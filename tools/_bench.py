@@ -46,6 +46,10 @@ def bench_throughput(label: str, run_fn, budget: int, rounds: int) -> float:
 
 def bench_contention(backend_name: str) -> None:
     """Латентность обращений UI, пока фон крутит эмуляцию."""
+    # В GUI main.py вызывает tune_gil_for_gui() -> setswitchinterval(0.0005).
+    # Без этого секция меряет дефолтные 5 мс ожидания GIL, а не поведение
+    # настоящего окна (значения выше целевых были артефактом настройки).
+    sys.setswitchinterval(0.0005)
     backend = m.make_backend(backend_name, _args(backend_name))
     stop = threading.Event()
 

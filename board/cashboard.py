@@ -195,6 +195,13 @@ class CashRegisterBoard(HardwareBus):
             for _reg in (PORT_A, PORT_B, PORT_C, CTRL):
                 self._ppi_aliases[(_base + _reg) & 0xFFFF] = _reg
 
+        # Кэш «горячих» строк wiring: _ppi_port_a/_ppi_port_b зовутся на
+        # КАЖДУЮ запись дисплея, и поиск по dict со строковым ключом там был
+        # заметен (бенчмарк: цепь ext_write ~24% времени demo51).
+        self._ppi_a_meaning = self.wiring["PPI_A_MEANING"]
+        self._ppi_b_meaning = self.wiring["PPI_B_MEANING"]
+        self._grid_blank = int(self.wiring["DISPLAY_GRID_BLANK"])
+
         self.display = display or Display(
             int(self.wiring["DISPLAY_DIGITS"]), int(self.wiring["DISPLAY_LINES"]))
         self.keyboard = keyboard or Keyboard()
@@ -360,7 +367,7 @@ class CashRegisterBoard(HardwareBus):
             return
         if self._ppi_order is None:
             self._ppi_order = "A"
-        if self.wiring["PPI_A_MEANING"] == "chars":
+        if self._ppi_a_meaning == "chars":
             idx = self._ppi_digit()
             if idx >= 0:
                 self.display.write_char(idx, value)
@@ -374,7 +381,7 @@ class CashRegisterBoard(HardwareBus):
             self._ppi_order = "B"
         idx = self._ppi_digit(value)
         if idx < 0:
-            self.display.select_grid(int(self.wiring["DISPLAY_GRID_BLANK"]), commit=False)
+            self.display.select_grid(self._grid_blank, commit=False)
             return
         self.display.select_grid(idx, commit=(self._ppi_order == "A"))
 
@@ -385,7 +392,7 @@ class CashRegisterBoard(HardwareBus):
             # in mode 1 there is no digit select on port B; keep the last one
             if self.ppi.mode_b == 1:
                 return self.display.grid if self.display.grid is not None else -1
-        if self.wiring["PPI_B_MEANING"] == "binary":
+        if self._ppi_b_meaning == "binary":
             idx = value & 0x0F
         elif value == 0:
             return -1

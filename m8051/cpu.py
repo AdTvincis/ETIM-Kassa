@@ -769,7 +769,6 @@ class CPU8051:
                     # SBUF/TCON/... must not be served from a stale batch
                     self._flush_peripherals()
                 self.acc = self.sfr[addr]
-            self.set_p()
             return 1
         if 0xF8 <= op <= 0xFF:                                     # MOV Rn,A
             self.pc = p
@@ -782,7 +781,6 @@ class CPU8051:
         if 0xE8 <= op <= 0xEF:                                     # MOV A,Rn
             self.pc = p
             self.acc = self._r(op & 7)
-            self.set_p()
             return 1
         if op == 0xB4:                                             # CJNE A,#imm,rel
             left, right = self.sfr[SFR_ACC], romb(p)
@@ -801,7 +799,6 @@ class CPU8051:
         if op in (0xE6, 0xE7):                                     # MOV A,@Ri
             self.pc = p
             self.acc = ram[self._ri(op & 1)]
-            self.set_p()
             return 1
         if op == 0xE4:                                              # CLR A
             self.pc = p
@@ -842,7 +839,6 @@ class CPU8051:
         if op == 0xE0:                                             # MOVX A,@DPTR
             self.pc = p
             self.acc = bus.ext_read(self.dptr) & 0xFF
-            self.set_p()
             return 2
         if op == 0x64:                                             # XRL A,#imm
             self.pc = p + 1
@@ -1040,7 +1036,6 @@ class CPU8051:
             if self.sfr[SFR_P2]:
                 addr |= self.sfr[SFR_P2] << 8
             self.acc = bus.ext_read(addr) & 0xFF
-            self.set_p()
             return 2
         # =============================================================== ADD
         if op in (0x26, 0x27):                                     # ADD A,@Ri
@@ -1197,7 +1192,6 @@ class CPU8051:
             tmp = ram[ri]
             ram[ri] = self.sfr[SFR_ACC]
             self.acc = tmp
-            self.set_p()
             return 1
         if 0xC8 <= op <= 0xCF:
             self.pc = p
