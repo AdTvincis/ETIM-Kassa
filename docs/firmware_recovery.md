@@ -346,10 +346,10 @@ called identifiers with no definition in the dump: 175
 ```powershell
 $env:PYTHONUTF8 = 1
 
-# 1. тесты восстановления (36 тестов)
+# 1. тесты восстановления (44 теста)
 python -m unittest tests.test_recover -q
 
-# 2. справка и самопроверка конвейера (12 проверок)
+# 2. справка и самопроверка конвейера (14 проверок)
 python tools/recover_firmware.py --help
 python tools/recover_firmware.py selftest
 
@@ -367,24 +367,21 @@ python tools/recover_firmware.py run FUN_CODE_8135 --args 1,2,3,4,5,6 --steps 50
 python -m unittest discover -s tests -q
 ```
 
-Результаты, зафиксированные при написании документа (после фикса):
+Актуальные результаты (прогон 11.10.2026, `PYTHONUTF8=1`, все изменения
+запущены, включая rebasing base-0 и миграцию `recover/`):
 
-* `tests.test_recover` — `Ran 36 tests ... OK` (~24 с);
-* `selftest` — 12 проверок `[ok]`, `selftest passed`; артефакты 563 483 и
-  540 077 байт, `globals bound to the machine — 188`;
-* `report` — см. §3.1: `functions 128`, `recovered 57`, `stubs 71`,
-  `globals 361`, `bodies parsed: 57/57`, `call targets outside every dump: 168`,
+* `tests.test_recover` — `Ran 44 tests in 58.2s ... OK`;
+* `selftest` — 14 проверок `[ok]`, `selftest passed`; артефакты 564 857 и
+  541 157 байт, `globals bound to the machine — 188`;
+* `report` — см. §3.1: `functions 128`, `recovered 57`, `partials 70`,
+  `stubs 1`, `globals 361`, `bodies parsed: 127/127 runnable functions`,
+  `call targets outside every dump: 168`,
   `called identifiers with no definition in the dump: 175`;
 * `run FUN_CODE_810f --args 1,2` — `returned 0`, 5 шагов;
 * `run FUN_CODE_8135 --args 1,2,3,4,5,6` — `returned 0`, 5 шагов (до фикса
   интерпретатора было 17);
-* полный набор `python -m unittest discover -s tests` — **`Ran 409 tests …
-  FAILED (failures=4, errors=1)`** (308 с). Все падения — в
-  `tests/test_opcodes.py` (`TestOpcodeRoundTrip`, `TestFormerGaps`,
-  `TestSelftestSourceRoundTrip`): это зона опкодов/дизассемблера, файл
-  в работе, и его результат меняется от прогона к прогону (предыдущий прогон
-  в тот же день давал `failures=3, skipped=2`). К пакету `recover/`
-  отношения не имеет — `tests.test_recover` стабильно зелёный.
+* полный набор `python -m unittest discover -s tests -q` —
+  **`Ran 421 tests in 296.2s` → `OK`** (0 падений, 0 ошибок, `0 skipped`).
 
 > `emit` перезаписывает `docs/recovered/firmware_clean.c` и
 > `docs/recovered/firmware_recovered.py`; `test_emit_writes_readable_c` делает это

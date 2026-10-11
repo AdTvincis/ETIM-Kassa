@@ -95,9 +95,12 @@ for _ch, _mask in SEG7.items():
 #   0x1000 l centre lower          0x2000 m centre upper
 #   0x4000 dp                      0x8000 sign/annunciator
 #
-# NOTE: this alphabet is a *reconstruction* (HYPOTHESIS) - the real font
-# lives in the missing lower half of the firmware.  The board falls back to
-# the 7-segment table and then to '?'.
+# NOTE: this alphabet is a *reconstruction* (HYPOTHESIS).  The dump does carry
+# font data - the 7-segment digits "0".."F" at record 0x9EBA (CPU 0x1EBA,
+# bytes verified) and the printer's needle-column tables at CPU
+# 0x6931..0x6D31 - but a ready 16-segment table for this Cyrillic alphabet
+# has not been identified in it.  So the board keeps its reconstruction and
+# falls back to the 7-segment table and then to '?'.
 # --------------------------------------------------------------------------
 _A, _B, _C, _D, _E, _F, _G1, _G2 = 0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040, 0x0080
 _H, _I, _J, _K, _L, _M = 0x0100, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000
@@ -199,8 +202,9 @@ for _ch, _mask in SEG16.items():
     SEG16_REVERSE.setdefault(_mask, _ch)
 
 
-# Transliteration used by the firmware for Cyrillic text (see
-# docs/hardware_analysis.md).  The display font only needs the "machine"
+# Transliteration used by the firmware for Cyrillic text (see the
+# "Character encoding" section of board/printer.py; the underlying strings are
+# in docs/rom_strings.txt).  The display font only needs the "machine"
 # character; map it onto the Cyrillic glyph so text() reads naturally.
 TRANSLIT: Dict[str, str] = {
     "a": "А", "b": "Б", "w": "В", "g": "Г", "d": "Д", "e": "Е", "z": "З",

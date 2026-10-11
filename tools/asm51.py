@@ -3,11 +3,16 @@
 
 Why it exists
 -------------
-The real cash-register firmware (``firmware/nm27c512n.hex``) is incomplete:
-its reset vector ``LJMP 0x0A06`` points into ``0x0000..0x7FFF``, the half of
-the ROM that was never dumped.  To give the emulator and the emulated board a
-program that actually runs, ``firmware/demo/cashier.asm`` is a *stand-in*
-(демонстрационная программа) written in this assembler's syntax.
+The real cash-register firmware (``firmware/nm27c512n.hex``) boots after the
+base-0 rebase: its Intel-HEX records sit at programmer offsets
+``0x8000..0xFFFF``, the image is really CPU ``0x0000..0x7FFF`` and the reset
+vector ``LJMP 0x0A06`` is genuine and executable.  What the dump still lacks
+is the upper half ``0x8000..0xFFFF``, and the decompilation does not fully
+cover the keyboard-scan/printer paths, so the original firmware is not yet a
+predictable test subject.  To give the emulator and the emulated board a
+program that actually runs deterministically, ``firmware/demo/cashier.asm``
+is a *stand-in* (демонстрационная программа) written in this assembler's
+syntax.
 
 The assembler is deliberately small but honest: it hand-encodes every opcode it
 supports and then **cross-checks each encoding by disassembling it again** with

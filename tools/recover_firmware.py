@@ -125,7 +125,11 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     print(f"dump        : {args.dump}")
     print(f"functions   : {stats['functions']}")
-    print(f"recovered   : {stats['recovered']}  (real bytes in {DUMP_ROM_START:#06x}..{DUMP_ROM_END:#06x})")
+    # DUMP_ROM_* are still hex RECORD offsets (recover/emit.py keeps the record
+    # grid); the CPU image is those records shifted down by the -0x8000 rebase.
+    print(f"recovered   : {stats['recovered']}  (real bytes in records "
+          f"{DUMP_ROM_START:#06x}..{DUMP_ROM_END:#06x} = CPU "
+          f"{DUMP_ROM_START - 0x8000:#06x}..{DUMP_ROM_END - 0x8000:#06x} after rebase)")
     print(f"partials    : {stats['partials']}  (executable statements, then halt_baddata)")
     print(f"stubs       : {stats['stubs']}  (body is only halt_baddata: nothing to run)")
     print(f"globals     : {stats['globals']}  ({stats['bit_globals']} bit cells)")

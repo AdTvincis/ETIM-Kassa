@@ -2,11 +2,14 @@
 
 What the firmware actually does
 -------------------------------
-The character/needle output routine sits at ROM ``0x81E7``-``0x81F6``::
+The character/needle output routine sits at records ``0x81E7``-``0x81F6``
+of the hex file (CPU ``0x01E7``-``0x01F6`` after the base-0 rebase; the
+addresses below are the record/Ghidra grid, see "Две сетки адресов" in
+``docs/architecture.md``)::
 
     81E7  MOV  DPL,#31h
     81EA  MOV  A,#69h
-    81EC  ADD  A,R6          ; R6 = pass 0..5  -> font table 0x6931+R6*0x100
+    81EC  ADD  A,R6          ; R6 = pass 0..4  -> needle table 0x6931+R6*0x100
     81ED  MOV  DPH,A
     81EF  MOV  A,R5          ; R5 = character code
     81F0  MOVC A,@A+DPTR     ; fetch one needle column
@@ -19,12 +22,18 @@ The character/needle output routine sits at ROM ``0x81E7``-``0x81F6``::
     83F8  CLR  P3.4          ; STROBE released in the ISR epilogue (FUN_CODE_83f0)
 
 So the native port is a write-only latch in XDATA page 0x81 and P3.4 is the
-strobe, which the board turns into "print this byte".  The 6 font tables live
-at 0x6931, 0x6A31 ... 0x6E31 - i.e. in the *missing* lower half of the
-firmware - and each entry is one column of vertical needles, so the real
-machine is a dot-matrix printer.  ``PRINTER_DATA_IS_DOTS`` in the WIRING block
-selects between that raw-column interpretation and the character-stream
-interpretation used by the demo firmware.
+strobe, which the board turns into "print this byte".  The **five** needle
+tables live at CPU ``0x6931 / 0x6A31 / 0x6B31 / 0x6C31 / 0x6D31`` (records
+``0xE931..0xED31``) - **inside this dump**: every one of the 177 indexable
+bytes is present and holds sparse needle-bit patterns, verified byte-wise.
+(The old claim of "6 tables ending at 0x6E31, in the missing half" was wrong
+twice over: pass ``R6 == 5`` takes a different branch - it writes ``0x55``
+to the latch instead of fetching a table - and record ``0xEE31`` at CPU
+``0x6E31`` holds code, ``PUSH PSW / ... / LCALL 6F22h``; see
+``docs/hardware_evidence.md`` §1.1.)  Each entry is one column of vertical
+needles, so the real machine is a dot-matrix printer.  ``PRINTER_DATA_IS_DOTS``
+in the WIRING block selects between that raw-column interpretation and the
+character-stream interpretation used by the demo firmware.
 
 The 8255 can drive the same printer through port A while the control word is
 0xA9 (group A mode 1, strobed output): /OBF on PC7, /ACK on PC6.
@@ -32,8 +41,10 @@ The 8255 can drive the same printer through port A while the control word is
 Character encoding
 ------------------
 The firmware stores Russian text as a German-style transliteration.  It is
-recoverable from the message table in the sibling dump
-(``firmware/winbond_w27c512-45.hex``, strings at 0xFD47..0xFF2A), e.g.::
+recoverable from the message table of the sibling dump ``winbond_w27c512-45``
+(the ``.hex`` itself was removed from the project; its extracted strings are
+kept in ``docs/rom_strings.txt``, section ``===== firmware/winbond_w27c512-45.hex
+=====``, e.g. ``0000FD47 "kontrolxnaq lenta"``), e.g.::
 
     kontrolxnaq lenta   -> контрольная лента
     nali~nye w kasse    -> наличные в кассе
@@ -43,7 +54,9 @@ recoverable from the message table in the sibling dump
     wyru~ka             -> выручка
 
 Letters confirmed by those strings are marked CONFIRMED; the five letters
-that never appear (ж ш ъ э ю) are HYPOTHESIS (see docs/hardware_analysis.md).
+that never appear (ж ш ъ э ю) are HYPOTHESIS (raw evidence:
+``docs/rom_strings.txt``; the same table drives the display transliteration
+in ``board/display.py``).
 """
 
 from __future__ import annotations

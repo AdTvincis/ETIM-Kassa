@@ -1,10 +1,18 @@
 """Run the cash-register firmware and report what it does.
 
+This tool loads ``nm27c512n.hex`` **rebased to CPU space**: the Intel-HEX
+records sit at programmer offsets ``0x8000..0xFFFF``, but the image is really
+the low 32 KiB of code space (``0x0000..0x7FFF``), so ``build_rom`` applies
+:func:`m8051.rom.rebase_low32k` - the same rule as
+``m8051/firmware_profile.py`` (record = CPU + ``0x8000``).  Every address
+below is a CPU address, and ``vectors`` / ``disasm`` / ``trace`` /
+``histogram`` show the real firmware, not the record offsets.
+
 Examples
 --------
     python tools/inspect_rom.py trace --cycles 3000000
     python tools/inspect_rom.py trace --cycles 500000 --watch 0x0000-0x000F
-    python tools/inspect_rom.py disasm 0x8000 60
+    python tools/inspect_rom.py disasm 0x0000 60
     python tools/inspect_rom.py vectors
     python tools/inspect_rom.py histogram --cycles 5000000
 """
@@ -20,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from m8051 import CPU8051, ROM  # noqa: E402
 from m8051.bus import HardwareBus  # noqa: E402
+from m8051.rom import rebase_low32k  # noqa: E402
 from tools.disasm import disassemble_one  # noqa: E402
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -85,17 +94,21 @@ class TraceBus(HardwareBus):
 
 def build_rom(path: str) -> ROM:
     rom = ROM(os.path.basename(path)).load_file(path)
+    rebase_low32k(rom)          # records 0x8000..0xFFFF -> CPU 0x0000..0x7FFF
     return rom
 
 
 def cmd_vectors(rom: ROM) -> None:
     print(f"ROM {rom.name}: {len(rom)} bytes, coverage {rom.coverage()}")
-    names = ["EXT0", "T0", "EXT1", "T1", "SERIAL", "T2", "PCA", "LVD", "SPI", "UART1"]
-    for i, vec in enumerate((0x03, 0x0B, 0x13, 0x1B, 0x23, 0x2B, 0x33, 0x3B, 0x43, 0x4B)):
-        target = rom.word(vec - 3) if False else rom.word(vec)
-        src = vec - 3
+    # The reset vector sits at 0x0000; interrupt vectors follow at their
+    # architectural addresses (0x03, 0x0B, 0x13, ...).  Print each entry
+    # itself - the first instruction already carries the LJMP target.
+    names = ["RESET", "EXT0", "T0", "EXT1", "T1", "SERIAL",
+             "T2", "PCA", "LVD", "SPI", "UART1"]
+    entries = (0x0000, 0x03, 0x0B, 0x13, 0x1B, 0x23, 0x2B, 0x33, 0x3B, 0x43, 0x4B)
+    for src, name in zip(entries, names):
         text, _ = disassemble_one(rom, src)
-        print(f"  {src:04X}: {text:<24} -> handler {target:04X}h   {names[i] if i < len(names) else ''}")
+        print(f"  {src:04X}: {text:<24} {name}")
 
 
 def cmd_disasm(rom: ROM, args) -> None:
@@ -161,7 +174,7 @@ def main() -> int:
 
     sub.add_parser("vectors")
     p = sub.add_parser("disasm")
-    p.add_argument("start", nargs="?", default="0x8000")
+    p.add_argument("start", nargs="?", default="0x0000")
     p.add_argument("count", nargs="?", type=int, default=60)
     p = sub.add_parser("trace")
     p.add_argument("--cycles", type=int, default=2_000_000)

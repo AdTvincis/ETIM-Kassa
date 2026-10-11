@@ -32,7 +32,8 @@ The 8255 question
 ``0x89`` / ``0xA9`` written to two low addresses *look* like 8255 mode words and
 that is how ``docs/architecture.md`` explains them.  The dump itself only proves
 two write-only bytes; the port registers an 8255 would need are touched only by
-code in the missing half of the ROM.  So the HAL models exactly that (two write
+code the dump has no bytes for (records below ``0x8000`` - decompiler
+guesswork).  So the HAL models exactly that (two write
 latches) and offers :func:`decode_8255_control` as an explicitly *labelled
 hypothesis* used for diagnostics - never as the device identity.
 
@@ -153,7 +154,8 @@ EVIDENCE: Dict[int, Evidence] = {
         CONFIRMED,
         values=(0x0B,),
         note="written as a hi/lo pair directly after P2 = 1 (C L905); sVar3 is "
-             "0x0BC5 / 0x0B95 - a code address in the missing half",
+             "0x0BC5 / 0x0B95 - code addresses below record 0x8000, where the "
+             "dump has no bytes",
     ),
     0x000016: Evidence(
         0x000016, "16-bit register, low byte", "w",
@@ -227,8 +229,8 @@ EVIDENCE: Dict[int, Evidence] = {
         "DAT_EXTMEM_1b83 = param_7 + 1U >> 1 | (param_7 + 1U) * -0x80;  "
         "pcVar4 = (char *)(*(code *)((ushort)DAT_EXTMEM_1b83 + 0x1b83))(...)",
         CONFIRMED,
-        note="index into a code table in the missing half; plain external RAM, "
-             "deliberately NOT hooked as a device",
+        note="index into a code table below record 0x8000 (no dump bytes "
+             "there); plain external RAM, deliberately NOT hooked as a device",
     ),
     # ------------------------------------------------------------- device pages
     0x000C00: Evidence(
@@ -421,7 +423,8 @@ def bind_recovered_aliases(machine: Machine, globals_, log=None) -> Dict[str, ob
     so the caller can be honest about what is still missing.  Nothing is
     guessed: the bit map comes from the dump's own declarations, the pin map
     from the ROM bytes quoted in :data:`PIN_ALIASES`, and ``DAT_CODE_xxxx``
-    reads ROM through ``Machine.read_code`` (which reports the missing half).
+    reads ROM through ``Machine.read_code`` (which reports addresses the dump
+    has no bytes for - records below ``0x8000``).
     """
     from .namespace import BitAddress
 

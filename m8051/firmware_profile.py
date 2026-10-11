@@ -40,7 +40,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .rom import ROM
+from .rom import ROM, rebase_low32k
 from .shim import build_shim
 
 __all__ = ["FirmwareProfile", "load_firmware", "available_images", "PROFILES"]
@@ -144,23 +144,10 @@ def _ret_stub_gaps(rom: ROM, skip_below: int = 0x0000) -> List[Tuple[int, int]]:
     return filled
 
 
-def _rebase_low32k(rom: ROM) -> bool:
-    """Shift a programmer-offset dump (records at 0x8000..0xFFFF) down to
-    the CPU addresses it really occupies (0x0000..0x7FFF).
-
-    Returns ``True`` when the shift happened.  See the module docstring for
-    the evidence: record 0x8000 holds the reset vector ``LJMP 0x0A06`` whose
-    target lies inside the same image, so the records are programmer offsets,
-    not CPU addresses.
-    """
-    if rom.coverage() != (ETIM_RECORD_BASE, 0xFFFF):
-        return False
-    shifted = {addr - ETIM_RECORD_BASE: value for addr, value in rom._mem.items()}
-    rom._mem.clear()
-    for addr, value in shifted.items():
-        rom._mem[addr] = value
-    rom.mapped = len(rom._mem)
-    return True
+#: The rebase rule lives in one place: :func:`m8051.rom.rebase_low32k`
+#: (this alias keeps the old private name for existing callers; the evidence
+#: is in the module docstring).
+_rebase_low32k = rebase_low32k
 
 
 def load_firmware(

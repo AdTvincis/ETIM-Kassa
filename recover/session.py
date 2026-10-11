@@ -543,7 +543,9 @@ class RecoveredFirmwareSession:
             except MissingFirmware as exc:
                 self._halted = True
                 self._running = False
-                self._reason = (f"recovered code needs the missing half: {exc}")
+                self._reason = (
+                    f"recovered code needs bytes the dump has no record of: {exc}"
+                )
                 break
             except RuntimeError as exc:
                 self._halted = True

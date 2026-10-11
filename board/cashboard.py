@@ -182,6 +182,19 @@ class CashRegisterBoard(HardwareBus):
         if wiring:
             self.wiring.update(wiring)
 
+        # PPI decode follows THIS instance's wiring.  A module-level alias map
+        # would pin every board to one hypothesis; the real ETIM firmware
+        # self-tests XDATA 0x0000..0x1FFF as plain RAM (four patterns + a
+        # walking test over 256 blocks), so its 8255 windows must live
+        # outside that range - see the evidence note on WIRING["PPI_BASE"].
+        self._ppi_aliases: Dict[int, int] = {}
+        _ppi_bases = (int(self.wiring["PPI_BASE"]),) + tuple(
+            int(b) for b in self.wiring["PPI_MIRROR_BASES"]       # type: ignore[union-attr]
+        )
+        for _base in _ppi_bases:
+            for _reg in (PORT_A, PORT_B, PORT_C, CTRL):
+                self._ppi_aliases[(_base + _reg) & 0xFFFF] = _reg
+
         self.display = display or Display(
             int(self.wiring["DISPLAY_DIGITS"]), int(self.wiring["DISPLAY_LINES"]))
         self.keyboard = keyboard or Keyboard()
@@ -242,9 +255,7 @@ class CashRegisterBoard(HardwareBus):
 
     # ====================================================== external memory
     def _is_ppi(self, addr: int) -> Optional[int]:
-        if addr in _PPI_READ_ALIASES:
-            return _PPI_READ_ALIASES[addr]
-        return None
+        return self._ppi_aliases.get(addr)
 
     def ext_write(self, addr: int, value: int) -> None:
         addr &= 0xFFFF

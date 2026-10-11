@@ -53,6 +53,8 @@ class Probe:
         self.wr_pages = collections.Counter()
         self.rd_first = {}
         self.wr_first = {}
+        self.hot = []            # (cycle, pc, addr, value) for 0x89/0xA9
+        self.cpu = None
         self._rd0 = board.ext_read
         self._wr0 = board.ext_write
         board.ext_read = self._rd
@@ -67,9 +69,13 @@ class Probe:
 
     def _wr(self, addr, value):
         addr &= 0xFFFF
+        value &= 0xFF
         self.wr[addr] += 1
         self.wr_pages[addr >> 8] += 1
         self.wr_first.setdefault(addr, self.board.cycles)
+        if value in (0x89, 0xA9):              # 8255 mode-set words
+            pc = self.cpu.pc if self.cpu is not None else -1
+            self.hot.append((self.board.cycles, pc, addr, value))
         return self._wr0(addr, value)
 
 
@@ -195,6 +201,57 @@ def main() -> None:
         print("stack 60..66:", " ".join("%02X" % cpu.ram[0x60 + i]
                                         for i in range(7)))
         print("IE=%02X TCON=%02X" % (cpu.sfr[0xA8], cpu.sfr[0x88]))
+
+    if mode == "fail":
+        # Run until the self-test error entry 0x1F32, logging every MOVX
+        # with the executing PC so we can see the failing compare.
+        import collections as _c
+        print("\n=== RUN TO SELF-TEST FAIL ENTRY 1F32 ===")
+        cpu.reset()
+        board.reset()
+        cpu.pc = 0
+        log = _c.deque(maxlen=400)
+        r0, w0 = board.ext_read, board.ext_write
+
+        def wr(addr, value):
+            log.append(("W", cpu.pc, addr & 0xFFFF, value & 0xFF))
+            return w0(addr, value)
+
+        def rd(addr, code=False):
+            v = r0(addr, code)
+            log.append(("R", cpu.pc, addr & 0xFFFF, v))
+            return v
+
+        board.ext_read, board.ext_write = rd, wr
+        try:
+            while not cpu.halted and cpu.pc != 0x1F32 and cpu.cycles < 8_000_000:
+                cpu.run(10_000)
+        finally:
+            board.ext_read, board.ext_write = r0, w0
+        print("stopped pc=%04X halted=%s err=%s cycles=%d"
+              % (cpu.pc, cpu.halted, cpu.error, cpu.cycles))
+        print("--- last 80 MOVX ops (kind, PC, addr, value) ---")
+        for row in list(log)[-80:]:
+            print("   %s pc=%04X addr=%04X val=%02X" % row)
+        # self-test registers at failure
+        psw = cpu.sfr[0xD0]
+        bank = (psw >> 3) & 3
+        regs = [cpu.ram[bank * 8 + i] for i in range(8)]
+        print("bank%d R0..R7 =" % bank, " ".join("%02X" % r for r in regs))
+        print("A=%02X B=%02X DPTR=%04X PSW=%02X (C=%d) SP=%02X"
+              % (cpu.sfr[0xE0], cpu.sfr[0xF0],
+                 (cpu.sfr[0x83] << 8) | cpu.sfr[0x82], psw, (psw >> 7) & 1,
+                 cpu.sfr[0x81]))
+        print("IE=%02X TCON=%02X PPI=%s"
+              % (cpu.sfr[0xA8], cpu.sfr[0x88], board.ppi.describe()))
+        print("disp:", repr(board.display.text()))
+        print("digitRAM50..5F:", " ".join("%02X" % cpu.ram[0x50 + i]
+                                          for i in range(0x10)))
+        # disassemble around failure arrival for context
+        print("--- disasm around pc ---")
+        for addr, txt, size in disassemble(rom, max(0, cpu.pc - 8), 12):
+            print("   %04X: %-16s %s" % (addr, rom.get_slice(addr, size).hex(),
+                                         txt))
 
     if mode == "keys":
         print("\n=== pressing keys ===")

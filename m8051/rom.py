@@ -5,7 +5,27 @@ from __future__ import annotations
 import os
 from typing import Dict, Iterable, Optional, Tuple
 
-__all__ = ["ROM", "load_intel_hex"]
+__all__ = ["ROM", "load_intel_hex", "rebase_low32k"]
+
+
+def rebase_low32k(rom: "ROM") -> bool:
+    """Shift a programmer-offset dump (records at 0x8000..0xFFFF) down to
+    the CPU addresses it really occupies (0x0000..0x7FFF).
+
+    Single source of truth for the ETIM dump rule (see
+    :mod:`m8051.firmware_profile` for the evidence: record 0x8000 holds the
+    reset vector ``LJMP 0x0A06`` whose target lies inside the same image, so
+    the records are programmer offsets, not CPU addresses).  Returns ``True``
+    when the shift happened; images with any other coverage are untouched.
+    """
+    if rom.coverage() != (0x8000, 0xFFFF):
+        return False
+    shifted = {addr - 0x8000: value for addr, value in rom._mem.items()}
+    rom._mem.clear()
+    for addr, value in shifted.items():
+        rom._mem[addr] = value
+    rom.mapped = len(rom._mem)
+    return True
 
 
 class _Mapped(dict):

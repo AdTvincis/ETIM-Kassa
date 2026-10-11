@@ -312,7 +312,7 @@ class TestFirmwareImagesLoad(unittest.TestCase):
         status = self._run_budget_without_exceptions("etim")
         self.assertEqual(status["source"], "etim")
         # после rebasing прошивка целиком лежит в нижних 32 КиБ: бюджет она
-        # должна отработать, а не упереться в недампленную половину
+        # должна отработать, а не упереться в недампленную верхнюю половину
         self.assertFalse(status["halted"],
                          "прошивка остановилась: %s" % status.get("reason"))
         self.assertIsNone(status["missing_pc"],

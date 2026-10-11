@@ -69,12 +69,17 @@ python main.py --help             # все опции
 ```
 
 * **`recovered`** — исполнение восстановленного из декомпилирования кода
-  (`recover/`: парсер → AST → интерполятор → HAL). В векторе сброса
-  `0x8000: LJMP 0x0A06`, а `0x0A06` не покрыт дампом, поэтому стартовая
-  программа не может пойти «сама по себе» — бэкенд сообщает об этом в поле
-  `reason` и по мере возможности отыгрывает то, что есть.
-* **`etim`** — настоящее ядро 8051 на байтах `firmware/nm27c512n.hex`
-  (адреса `0x8000..0xFFFF`, нижняя половина ПЗУ отсутствует).
+  (`recover/`: парсер → AST → интерполятор → HAL), а поверх — **оригинальных
+  байтов прошивки на ядре `m8051`** (`recover/realrun.py`). После rebasing
+  вектор сброса настоящий: запись `0x8000` = CPU `0x0000` — `LJMP 0x0A06`,
+  цель внутри дампа, поэтому байты стартуют «сами», таймеры прошивки сами
+  диспетчеризуют её обработчики (мультиплексор дисплея CPU `0x02D9`);
+  недостающая верхняя половина CPU `0x8000..0xFFFF` названа в поле `reason`
+  и честно останавливает CPU, если до неё дойдёт дело.
+* **`etim`** — настоящее ядро 8051 на байтах `firmware/nm27c512n.hex` после
+  rebasing: образ занимает CPU `0x0000..0x7FFF` и крутится от настоящего
+  вектора сброса; верхняя половина `0x8000..0xFFFF` в дамп не вошла
+  (`missing_bytes: 32768`).
 * **`demo51`** — демонстрационная программа `firmware/demo/cashier.asm`,
   собранная ассемблером `tools/asm51.py`: настоящий машинный код 8051 на той
   же плате кассы. Это **стенд-ин, а не оригинальная прошивка** — в строке
@@ -237,41 +242,58 @@ GUI в этом окружении не выйдет (используйте `--
 --- статус ---
   aliases: {'bits': 43, 'pins': 9, 'code': 2, 'unresolved': []}
   boot_error:
-  demo_steps_done: 6
-  display:  2345678
+  consumer: producers RUN: the reset entry CPU 0x0A06 (record 0x8A06) is inside this dump, and executing the real image shows the main loop filling RAM 0x50..0x5F from OUTSIDE the mux ISR while CPU 0x02D9 multiplexes it onto the screen (verified by running - see tests.test_recover.TestRealHexRunner). The refresh body CPU 0x0135 has no static callers only because it is entered by vector dispatch, not by a CALL; it is not a producer and never needed to be one.
+  cpu_instructions: 252214
+  demo_steps_done: 0
+  display: ........
   entry: 0x0A06
-  entry_covered: False
+  entry_covered: True
   functions_failed: 0
   functions_loaded: 128
   globals: 188
-  halted: True
+  halted: False
   isr:
+  isr_calls: 0
   missing_calls: 0
-  reason: reset vector 0x8000 = LJMP 0x0A06; 0x0A06 is not covered by the dump (missing half of the ROM), so the recovered program cannot start; demo sequence finished (source=demo)
-  receipt_lines: 5
-  running: False
-  source: demo
-  steps: 6
-  кадров эмуляции: 101, ошибок: 0
-  экран: ' 2345678'
-  чек: 5 строк
-    | 5КАССА ЕТИМ
-    | ПРОДАЗХА
-    | ИТОГ  1234.56
-    |
-    |
+  mux_calls: 51
+  real_hex: True
+  reason: reset vector record 0x8000 = LJMP 0x0A06; CPU 0x0A06 (record 0x8A06) is covered by the dump, so the ORIGINAL bytes boot from the real reset vector on the m8051 core (recover.realrun): the firmware's own timers dispatch its ISRs (display mux CPU 0x02D9); no pseudo-code interpreter involved; NOT dumped: the upper half 0x8000..0xFFFF of CPU space - execution halts honestly if it ever fetches there; consumer: ... (полное значение — как в поле consumer выше)
+  receipt_lines: 0
+  running: True
+  source: recovered
+  steps: 51
+  кадров эмуляции: 19, ошибок: 0
+  экран: '........'
+  чек: 0 строк
+```
+
+```
+бэкенд: etim — nm27c512n.hex: reset=0x0000, flash=32768B, filler=0B, stub=0B, missing=32768B
+--- статус ---
+  cycles: 400004
+  halted: False
+  missing_bytes: 32768
+  missing_pc: None
+  ops: 266226
+  pc: 26839
+  reason:
+  reset_pc: 0
+  source: etim
+  кадров эмуляции: 20, ошибок: 0
+  экран: '........'
+  чек: 0 строк
 ```
 
 ```
 бэкенд: demo51 — демонстрационная 8051-программа (стенд-ин)
 --- статус ---
-  cycles: 520007
+  cycles: 780007
   halted: False
-  ops: 341137
-  pc: 255
+  ops: 511845
+  pc: 311
   reason:
   source: demo
-  кадров эмуляции: 26, ошибок: 0
+  кадров эмуляции: 39, ошибок: 0
   экран: '0    000'
   чек: 0 строк
 ```
@@ -279,14 +301,75 @@ GUI в этом окружении не выйдет (используйте `--
 (Числа `cycles`/`ops`/`pc`/`кадров` зависят от машины и нагрузки — это
 срез реального прогона, схема полей важнее цифр.)
 
+**Финальные факты о экране (после PPI-эксперимента).** При дефолтной
+проводке `WIRING: PPI_BASE=0x0000` (страница ППИ — всё ещё гипотеза:
+известно, что в этом месте она неверна, но настоящая страница пока не
+найдена) декод 8255 попадает внутрь диапазона собственного самотеста
+внешней RAM прошивки: при загрузке прошивка прогоняет по XDATA
+`0x0000..0x1FFF` четыре тестовых паттерна и «walking test» (256 блоков),
+и самое первое сравнение падает — порт A отдаёт `0xFF` вместо `0x00`.
+Прошивка уходит в свою штатную ветку ошибки и показывает **свой
+собственный экран самодиагностики**. Свежий прогон
+`python main.py --backend recovered --headless 15` (снят вживую; поля
+`consumer`/`reason` — те же, что в полном блоке 3 с выше, здесь сокращены):
+
+```
+бэкенд: recovered — Восстановленный код прошивки (Ghidra -> recover/)
+--- статус ---
+  ...
+  cpu_instructions: 1099825
+  display:   .h0000
+  entry: 0x0A06
+  entry_covered: True
+  ...
+  halted: False
+  mux_calls: 723
+  real_hex: True
+  reason: reset vector record 0x8000 = LJMP 0x0A06; ... ; NOT dumped: the upper half 0x8000..0xFFFF of CPU space - execution halts honestly if it ever fetches there; consumer: ...
+  running: True
+  source: recovered
+  steps: 723
+  кадров эмуляции: 82, ошибок: 0
+  экран: '  .h0000'
+  чек: 0 строк
+```
+
+`'  .h0000'` — это адрес упавшей ячейки: `0000h` (цифры — nibble-шрифт
+из RAM самой прошивки, символ `h` записан литерой, байт `0x74`), плюс
+пробелы и точка-разделитель. После падения ядро паркуется на CPU `0x1F60`
+(`SJMP $`), а развёртку продолжает крутить таймер 0 (`mux_calls: 723`) —
+поэтому экран выглядит «живым». Это **настоящий вывод настоящей
+прошивки** (честная самодиагностика), а не сбой эмуляции; диагностика —
+`tools/_diag_base0.py`.
+
+Эксперимент: когда декод ППИ перенесли на `0xF000` (и `0x0000..0x1FFF`
+становится чистой RAM), самотест проходит, экрана ошибки нет, загрузка
+доходит примерно до 1,92 млн циклов — и дальше **сама прошивка**
+программно поднимает INT0 (`SETB TCON.1`), чей настоящий обработчик
+(CPU `0x04D1`) гасит сетку и зацикливается на CPU `0x04DF` с выключенным
+`EA`: загрузка упирается в штатный «сон» кассы, экран остаётся
+`'........'`. То есть один лишь перенос ППИ рабочий покой пока не даёт:
+открытая находка следующего этапа — почему INT0 срабатывает так рано
+(состояние бита `0x24.0`). Дефолтную проводку `PPI_BASE=0x0000` не
+меняли.
+
+**Клавиатура настоящей прошивки в этом состоянии недоступна**: её
+сканирование живёт в цепи таймера 1, которую эта зависшая прошивка не
+запускает. Интерактивный сценарий «продажа» даёт стенд-ин
+`--backend demo51` — оба факта честно помечены и в таблице бэкендов
+(`README.md`), и здесь.
+
 Поля блока `--- статус ---` (состав зависит от бэкенда):
 
 | Поле | Что это |
 | --- | --- |
 | `source` | какой бэкенд отвечает за статус (`demo`, `etim`…) |
 | `cycles` / `ops` / `pc` | машинные циклы, исполненные опкоды, текущий счётчик команд |
-| `halted` / `reason` | остановилось ли ядро и почему (например, вход в непокрытую дампом половину ПЗУ) |
-| `missing_pc` / `missing_bytes` / `entry_covered` | что из ПЗУ отсутствует/не покрыто дампом |
+| `halted` / `reason` | остановилось ли ядро и почему (например, честный останов на fetch в отсутствующую верхнюю половину CPU `0x8000..0xFFFF`) |
+| `entry` / `entry_covered` | адрес вектора сброса, прочитанный из образа (`0x0A06`), и покрыт ли он дампом (после rebasing — всегда `True`) |
+| `missing_pc` / `missing_bytes` | какого адреса коснулся недостающий байт и сколько байтов CPU-пространства не покрыто дампом (для `etim`: `32768`, `missing_pc: None` = ни разу не понадобилось) |
+| `real_hex` / `isr_calls` / `mux_calls` / `cpu_instructions` | исполняются ли оригинальные байты (`recovered`), сколько раз сработали обработчики прошивки и сколько инструкций выполнило ядро |
+| `consumer` | вердикт, кто наполняет буфер дисплея (`producers RUN` = настоящий главный цикл прошивки) |
 | `functions_loaded` / `functions_failed` / `globals` | статистика разбора декомпилированного дампа |
 | `receipt_lines` | строк в принтере |
 | `кадров эмуляции` | сколько раз дозированы циклы (штатно ~50 в секунду; меньше, если эмуляция не успевает за реальным временем) |
@@ -368,11 +451,12 @@ python -m unittest tests.test_ui_headless.TestAppWithMockBoard.test_mouse_click_
 | `tests/test_perf.py` | производительность ядра, boot демо-прошивки, бюджет времени прогона |
 | `tests/test_ui_headless.py` | UI без создания окна: импорты, раскладка, клики, чек, строка состояния (mock-плата ровно по `docs/board_contract.md`) |
 
-**Итог: 415 тестов — все зелёные.** Контрольный прогон после стабилизации
-набора: `python -m unittest discover -s tests -q` → `Ran 415 tests in 217.2s`,
-`OK` (0 падений, 0 ошибок), `0 skipped` — skip-guard'ы известных пробелов,
-задокументированы: условные пропуски в `test_cpu_conformance`, `test_opcodes`
-и `test_perf` срабатывают только при обнаружении известного расхождения.
+**Итог: 421 тест — все зелёные.** Контрольный прогон (11.10.2026, все
+изменения запущены): `python -m unittest discover -s tests -q` →
+`Ran 421 tests in 296.2s`, `OK` (0 падений, 0 ошибок, `0 skipped`) —
+skip-guard'ы известных пробелов задокументированы: условные пропуски в
+`test_cpu_conformance`, `test_opcodes` и `test_perf` срабатывают только при
+обнаружении известного расхождения.
 
 ### Как интерпретировать вывод
 
@@ -380,7 +464,7 @@ python -m unittest tests.test_ui_headless.TestAppWithMockBoard.test_mouse_click_
 
 ```
 ----------------------------------------------------------------------
-Ran 415 tests in 217.2s
+Ran 421 tests in 296.2s
 
 OK
 ```
@@ -452,5 +536,5 @@ python -m tools.asm51 firmware/demo/cashier.asm -o out.hex [--bin out.bin] [--or
 | кракозябры в консоли/тестах | `$env:PYTHONUTF8 = 1` (PowerShell) или `chcp 65001` |
 | `warn tkinter: ...` в `--selftest` | нет графического дисплея — работайте через `--headless` |
 | `не удалось запустить '<backend>'` (код `2`) | `python main.py --list`, затем `--backend demo51` |
-| окно открывается, экран пуст | это нормально для `recovered`/`etim`: нижняя половина ПЗУ утеряна, см. `reason` в `--headless` и [hardware_from_pseudocode.md](hardware_from_pseudocode.md) |
-| падает какой-то тест | набор зелёный по умолчанию (415/OK) — падение это регрессия: смотрите traceback `FAIL: <имя>` (§5), точечно: `python -m unittest <модуль>` |
+| окно открывается, экран пуст | у `recovered`/`etim` индикатор заполняется настоящим кодом не мгновенно (при текущей проводке: `........` через 3 с, дальше — экран самотеста прошивки; см. §4.3 и оговорку о `PPI_BASE`); детали — `reason` в `--headless` и [hardware_from_pseudocode.md](hardware_from_pseudocode.md) |
+| падает какой-то тест | набор зелёный по умолчанию (421/OK) — падение это регрессия: смотрите traceback `FAIL: <имя>` (§5), точечно: `python -m unittest <модуль>` |

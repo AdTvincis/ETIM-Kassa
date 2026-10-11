@@ -10,8 +10,12 @@ so the host can load it exactly like any other code image::
     rom.load_block(0x0000, image)
 
 The program is a **демонстрационная замена** (stand-in) for the real ETIM
-firmware, whose lower half (``0x0000..0x7FFF``) was never dumped.  It is *not*
-the original firmware and must always be labelled as such.
+firmware.  The real image is recovered and boots (see
+``m8051/firmware_profile``), but its keyboard path runs through its Timer-1
+chain, which the idle firmware never starts in this emulation - so this demo
+is what a *fully interactive* cash-register flow (keys -> sale -> receipt)
+looks like on the same board.  It is *not* the original firmware and must
+always be labelled as such.
 """
 
 from __future__ import annotations
