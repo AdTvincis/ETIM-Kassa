@@ -1,0 +1,247 @@
+===== firmware/nm27c512n.hex (8000..FFFF) =====
+00008026  Copyright (C) 1994-95, AO "ETIM" SPb  
+00008120  !#"&$,()u
+00008203  AIHLDFBC 
+00008266  AIHLDFBCt)
+00008326  /Pu/>
+00008B2D  'u/>u
+00008D9C  b &)0(
+00008E19  4u_m 
+00008E3C  u_wu^c
+00008ECD  .iyPx<
+0000902B   &#0* 
+000092F9  /pyFx
+000093B4  `G00&
+0000968C  u_Hu^H
+00009A91   (B &
+00009C37  uQ?uR
+00009EBC  [Ofm}
+00009EC3  ow|9^yq
+00009F28  Tx0y 
+0000A232  KLMN"
+0000AC24  u_9u^
+0000AED1  /d`=P;u
+0000AF33  X@00 y
+0000B475  "1`(x
+0000B754  434V4
+0000B7F0  X0u]@y_x
+0000B881  "0'AyG
+0000B979  1)1010110101
+0000B9BE  uYfuR@uS
+0000BB4F  ) YHC+OPRZIJX/VEBWA.-SKGQ*TLD
+0000BBBF  >vx]y
+0000BC5E  .iuZHt
+0000BFF6  uU@uX
+0000C029  uUHuQ
+0000C29A  uUHuP
+0000C33F  u_vu\@
+0000C813  \(uR@uS@
+0000C8B7  uR@uS@y]
+0000C8F0  )$%&*uR@uQ
+0000C93D  uB(uC
+0000CA29  "RkRnRqRwR
+0000D28B  7s?1?v
+0000D337  vy7sw
+0000D6D4  uV@uPt"
+0000D6E1  X"u_7u^
+0000D6E9  "u_Ou^
+0000D6F0  "u_9u^
+0000D8A5  xXyY &
+0000DB7E   #% $
+0000DBAF   $# #
+0000E04F  .ix<yP
+0000E3AA  X@x4y
+0000E662  Z)t*0
+0000E6FE  X)yEx
+0000E717  ]lxEy
+0000E73C  ]wxEy
+0000E856  # #;#?#a#*#o#w#
+0000E874  %M%X%
+0000E888  &p&|&
+0000E9A6  <8<"02
+0000EA16  ">0>> >>">
+0000EB6B  lnD$D
+0000EB9F   "%$"*
+0000EBD1  *R* "*>*
+0000EC22  *TRR(
+0000ECD2  R*0>*
+0000ED70  `j>lD8
+0000ED80  8`}nL
+0000EDA7  8<">&
+0000EDD9  >>">>>
+0000EDF9  ((((((((
+0000EE4B  /t1 .
+0000EE59  6t0 .
+0000EEFE  t?"t00
+0000EF12  $0" .
+0000F789  SQn#*
+0000F8B9  NwHBm1G
+0000F95A  K)g_cu
+0000F9A2  +FXT=
+0000FB37  hfyGi
+0000FB61  <~U12
+0000FBCC  *Ki%?
+0000FD89  bzk"w
+0000FE28  8y{)A
+0000FE6F  nyYfH
+0000FED6  -\+?`8
+0000FF07  }_Z";L
+0000FFF7  0LVv:
+===== firmware/winbond_w27c512-45.hex (1000..FFFF) =====
+0000106B  Copyright(C)Versia
+00001410   $(26
+00001419   %05@E
+00001423  $06BHT
+0000142C  !(5BIVc
+00001436  $2@HVdr
+00001440  '6ETcr
+00001866  yUgpS
+00001E89  "w$]m.k{%
+00001E93  o?zS|[
+0000350E  nzG{f
+000039D2  nzA{f
+00003A9B  nzA{e
+00003C07  fQz\{
+00004248  puP0uI
+00005649  ;zn{f
+0000565B  ;zo{f
+0000566D  ;z'{g
+0000575A  XJu;;z
+0000578F  nz'{g
+00006B28  |%}fz
+00006B35  S|%}fz
+00006B6F  nz5{f
+00006DDC  Cz\{c
+0000702F  ;zZ{f
+0000704E  ;z[{f
+00007068  nzX{f
+00007250  9zX{f
+000074EC  nz]{f
+00007936  nz[{f
+00007A00  nzc{f
+00008E8C  nz'{`
+00008F6F  9z'{`
+000095F2  }]zX{f
+00009681  :u<su=o
+000097CF  u<ku=p
+00009844  u<wu=t
+00009879  PzZ{f
+000098EA  :zV{g
+0000992C  :zP{g
+000099E4  :z;{f
+00009A28  :zA{f
+00009A6B  Xu<iu=s
+00009A8E  lzY{f
+00009AC8  nu<nu=i
+00009B30  \zf{f
+00009E39  Sz\{c
+00009E53  SzA{f
+00009E61  Sz;{f
+00009EE1  |A}ezB{
+0000A0A4  "z\{f
+0000A0B6  ;z]{f
+0000A424  ,zA{f
+0000ADFA  :"z-{
+0000B1A7  "|%}fz
+0000B5F5  nz){c
+0000B6E4  f]t1%9
+0000B7A2  n|A}ezB{
+0000B824  nzP{g
+0000B82E  6zV{g
+0000B943  FzA{f
+0000B987  az<{`
+0000B9E4  lzA{f
+0000BA72  :z<{`
+0000BB5B  nzf{f
+0000BB6F  ;ze{f
+0000BB91  nzd{f
+0000C137  "zX{f
+0000C296  nzm{f
+0000CA13  ;zh{f
+0000CB77  xzh{f
+0000CC8E  "|r}gz
+0000CC99  %|t}gz
+0000CCA4  %|v}gz
+0000CCAF  %|x}gz
+0000CCBA  %|z}gzP{g
+0000CCC5  %||}gzV{g
+0000CCD0  %|~}gz\{g
+0000CCF9  %|s}cz,{c
+0000CD04  %|u}cz2{c
+0000CD0F  %|w}cz8{c
+0000CD1A  %|y}cz>{c
+0000CD25  %|{}cz,{g
+0000CD30  %|}}cz2{g
+0000CD3E  }cz8{g
+0000CD64  %|b}gzD{c
+0000CD6F  %|d}gzJ{c
+0000CD7A  %|f}gzP{c
+0000CD85  %|h}gzV{c
+0000CD90  %|j}gz>{g
+0000CD9B  %|l}gzD{g
+0000CDA6  %|n}gzJ{g
+0000CDB1  %zp{g
+0000D3BF  SzP{g
+0000D3C6  SzV{g
+0000D3CD  Sz\{g
+0000D3D4  S|A}ez
+0000D760  -&|A}ez={
+0000D7CE  |A}ezC{
+0000D814  |A}ezP{
+0000DB51  iz'{g
+0000E413  ?uDcuE
+0000E62E  !6zX{f
+0000E6B7  Fz\{c
+0000E73B  u^`u9
+0000EA1C  u^`u7
+0000F128  nz+{g
+0000F215  "z'{g
+0000F229  ;z({g
+0000F24A  ;z){g
+0000F43F  7zm{f
+0000F49A  :zm{f
+0000F739  nzi{c
+0000FB02  nu;(|
+0000FCD5  333E7
+0000FD47  "kontrolxnaq lenta
+0000FD5F  nali~
+0000FD65  sda~a
+0000FD6B   konec   
+0000FD75   spasibo!
+0000FD88   test tpu
+0000FD92    teku}ij itog
+0000FDA1  protokol
+0000FDAA   wozwrat
+0000FDB4  zagolowok
+0000FDBE  snqtaq wyru~ka
+0000FDCD  koli~estwo snqtij
+0000FDDF  snqtie N
+0000FDE8  nali~nye w kasse
+0000FDF9  wnesennaq summa
+0000FE09    nefiskalxnyj
+0000FE18  kassir
+0000FE1F  fiskalxnyi ot~et
+0000FE30  fiskalizaciq
+0000FE3D  reg.N
+0000FE48  parolx
+0000FE4F  * pfp
+0000FE55    polnyj
+0000FE5E  beznali~n. ras~et
+0000FE70  narabotka
+0000FE7A  wersiq po    . . 
+0000FE8C    koli~estwo
+0000FE99  smennyh ot~etow
+0000FEA9  za dannyj period
+0000FEBA  dublikat 
+0000FEC4  itog s nsp
+0000FECF  itog prodav
+0000FEDB  skidki
+0000FEE2  nadbawki
+0000FEEB  w t~ nalog %
+0000FEF8  nulewoj ~ek
+0000FF04  srok obsluviwaniq
+0000FF16  zakan~iwaetsq
+0000FF24  istek
+0000FF2A   ALL RIGHT RESERVED (C) VERSIA-T
+0000FF58  _<P$a
+0000FFF7  *6~Ii

@@ -1,0 +1,117 @@
+# «ЭТИМ» — эмулятор кассы на Python (процессор AT89C55VD, MCS-51)
+
+Python-эмуляция кассы АО «ЭТИМ» (Санкт-Петербург, 1994–95): процессор
+AT89C55VD (совместим с MCS-51), знаковый индикатор, матричная клавиатура,
+чековый принтер и интерфейс на **Tkinter** с классическими объёмными кнопками
+и тёмным фоном.
+
+Проект восстановлен из декомпиляции дампа прошивки `nm27c512n.c` (Ghidra) и
+байтов ПЗУ `firmware/nm27c512n.hex`. Так как сохранилась только верхняя
+половина ПЗУ (`0x8000..0xFFFF`), а вектор сброса ведёт в отсутствующую нижнюю
+часть (`LJMP 0x0A06`), проект честно предлагает три режима запуска (`--backend`)
+— см. ниже и `docs/architecture.md`.
+
+## Что умеет
+
+* **Эмулятор 8051** (`m8051/`) — 256 опкодов, таймеры, UART, прерывания,
+  порты, работа с внешней памятью (`MOVX`) по контракту `HardwareBus`.
+* **Плата кассы** (`board/`) — ППИ 8255, индикатор, матрица клавиатуры,
+  чековый принтер; протокол «плата ↔ интерфейс» зафиксирован в
+  `docs/board_contract.md`.
+* **Восстановленная прошивка** (`recover/`) — разбор декомпилированного
+  псевдо-C, AST, интерпретатор поверх модели 8051, привязка адресов железа:
+  **128 функций** (57 recovered + 70 partial + 1 stub), самопроверка
+  конвейера `python -m tools.recover_firmware selftest` — 14 ok.
+* **Интерфейс** (`ui/`) — окно кассы: индикатор, клавиатура, бумажная лента
+  чека, строка состояния, меню; управление мышью и физической клавиатурой.
+* **Инструменты** (`tools/`) — дизассемблер и ассемблер MCS-51, анализ ПЗУ,
+  CLI восстановления прошивки.
+
+## Требования
+
+* Python 3 (проверено на **Python 3.14.4**); Tkinter входит в стандартную
+  поставку — сторонних пакетов **не нужно** (`pip install` не требуется).
+* На Windows рекомендуется задать UTF-8, чтобы русский текст в консоли и
+  тестах отображался корректно:
+
+```powershell
+$env:PYTHONUTF8 = 1
+```
+
+## Быстрый старт
+
+```bash
+python main.py                    # GUI: восстановленный код (режим по умолчанию)
+python main.py --backend demo51   # GUI: демонстрационная 8051-программа
+python main.py --list             # перечислить варианты запуска и образы ПЗУ
+python main.py --selftest         # быстрая проверка, что всё импортируется (без окна)
+python main.py --headless 5       # без окна: погонять эмуляцию 5 секунд и печатать статус
+```
+
+Все опции: `python main.py --help`. Подробное руководство (GUI, CLI,
+тесты, интерпретация вывода) — в [docs/usage.md](docs/usage.md).
+
+## Варианты запуска (`--backend`)
+
+| Режим | Что внутри | Достоверность |
+| --- | --- | --- |
+| `recovered` (по умолчанию) | декомпилированный код `docs/nm27c512n_decompiled.c` → `recover/` | логика настоящая для адресов `0x8000..0xFFFF`; недостающая половина ПЗУ честно помечается |
+| `etim` | ядро `m8051` + дамп `firmware/nm27c512n.hex` | байты настоящие, нижняя половина ПЗУ отсутствует |
+| `demo51` | `firmware/demo/cashier.asm`, собранная `tools/asm51.py` | стенд-ин: настоящий машинный код 8051, но **не** оригинальная прошивка |
+
+`python main.py --self-test` дополнительно заставляет плату саму показать
+картинку на индикаторе и напечатать образцовый чек (прогон идёт через те же
+порты, что и у процессора).
+
+## Структура проекта
+
+```
+main.py         точка входа (CLI + запуск GUI)
+m8051/          ядро процессора 8051: cpu.py, rom.py, bus.py, shim.py,
+                firmware_profile.py
+board/          плата кассы: ppi8255.py, display.py, keyboard.py,
+                printer.py, cashboard.py
+recover/        восстановление декомпилированного кода: parse.py, cparse.py,
+                interp.py, hal.py, session.py, emit.py, ...
+ui/             интерфейс Tkinter: app.py, theme.py, screen.py,
+                keypad.py, receipt.py
+tools/          disasm.py, asm51.py, inspect_rom.py, recover_firmware.py
+firmware/       образы ПЗУ (*.hex) и демо-прошивка firmware/demo/
+tests/          тесты unittest (см. раздел «Тесты»)
+docs/           документация и анализ
+nm27c512n.c     дамп дизассемблированного кода (исходный материал)
+```
+
+## Тесты
+
+Тесты — встроенный `unittest` (pytest не используется):
+
+```bash
+python -m unittest discover -s tests -q     # тихий прогон всего набора
+python -m unittest discover -s tests -v     # с именами тестов
+python -m unittest tests.test_ui_headless   # один файл
+```
+
+Девять файлов: `test_cpu`, `test_cpu_conformance`, `test_opcodes`,
+`test_board`, `test_recover`, `test_demo_firmware`, `test_integration`,
+`test_perf`, `test_ui_headless`.
+
+> **Статус: 415 тестов, все зелёные.** Контрольный прогон:
+> `python -m unittest discover -s tests -q` → `Ran 415 tests in 217.2s`,
+> `OK` (0 падений, 0 ошибок). `0 skipped` — skip-guard'ы известных пробелов,
+> задокументированы в самих тестах (`test_cpu_conformance`, `test_opcodes`,
+> `test_perf`): условные пропуски, которые срабатывают только при
+> обнаружении известного расхождения.
+
+## Документация
+
+| Документ | Содержание |
+| --- | --- |
+| [docs/usage.md](docs/usage.md) | руководство пользователя: GUI, CLI, тесты, интерпретация вывода |
+| [docs/architecture.md](docs/architecture.md) | архитектура, режимы запуска, контракт `HardwareBus`, требования к UI |
+| [docs/board_contract.md](docs/board_contract.md) | протокол «плата → интерфейс»: `display`, `keyboard`, `printer` |
+| [docs/hardware_from_pseudocode.md](docs/hardware_from_pseudocode.md) | структура кассы, восстановленная из псевдокода (CONFIRMED/HYPOTHESIS) |
+| [docs/firmware_recovery.md](docs/firmware_recovery.md) | восстановление прошивки: конвейер, статистика, ограничения |
+| [docs/hardware_evidence.md](docs/hardware_evidence.md) | доказательства по периферии кассы из декомпилированного кода |
+| [docs/nm27c512n_decompiled.c](docs/nm27c512n_decompiled.c) | дамп декомпиляции (исходный материал восстановления) |
+| [docs/rom_strings.txt](docs/rom_strings.txt) | строки, извлечённые из обоих дампов ПЗУ (сам winbond-дамп из проекта исключён, работает только `nm27c512n.hex`) |
