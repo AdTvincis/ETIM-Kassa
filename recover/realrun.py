@@ -138,6 +138,20 @@ class RealBus(HardwareBus):
         self.evidence_reads: Dict[int, int] = {}
         #: MissingFirmware raised for anything else (write paths etc.)
         self.gaps: List[str] = []
+        # Peripheral time: the core ticks the bus every few machine cycles
+        # while its timers run, but the peripherals (printer, keyboard, INT0
+        # hold, busy flags) only ever consume *totals* - so accumulate here
+        # and forward in chunks.  :meth:`RealRunner.advance` flushes at every
+        # slice boundary, so outside observers always see current board time.
+        self._tick_acc = 0
+        tick_fn = None
+        if hal is not None and hasattr(hal, "tick"):
+            tick_fn = hal.tick
+        elif board is not None:
+            tick_fn = board.tick
+        self._tick_fn = tick_fn
+        #: board-interrupt sampling countdown (see :meth:`irq_requested`)
+        self._irq_skip = 0
 
     # ------------------------------------------------------------ diagnostics
     @staticmethod
@@ -208,16 +222,72 @@ class RealBus(HardwareBus):
             self.board.port_change(port, old, new)
 
     # ------------------------------------------------------------------ other
+    #: machine cycles of peripheral time forwarded per chunk (printer/keyboard
+    #: timing only needs totals; a 64-cycle quantum stays far below any
+    #: device's resolution while collapsing the per-instruction tick chain).
+    _TICK_CHUNK = 64
+
+    #: board polls skipped after a poll that found *nothing* pending.  The
+    #: board's INT0 request is an event that persists until observed (see
+    #: ``CashRegisterBoard.irq_requested``), so skipping cannot lose it - a
+    #: fresh key event is vectorised at worst ``_IRQ_SKIP + 1`` instruction
+    #: boundaries later.  Positive answers are never cached: a raised line is
+    #: re-polled on the very next call, so level-triggered lines
+    #: (``EXTRA_IRQ``) behave exactly as before.
+    _IRQ_SKIP = 15
+
     def tick(self, cycles: int) -> None:
-        if self.hal is not None and hasattr(self.hal, "tick"):
-            self.hal.tick(cycles)
-        elif self.board is not None:
-            self.board.tick(cycles)
+        fn = self._tick_fn
+        if fn is None:
+            return
+        acc = self._tick_acc + cycles
+        if acc >= self._TICK_CHUNK:
+            self._tick_acc = 0
+            fn(acc)
+        else:
+            self._tick_acc = acc
+
+    def flush_tick(self) -> None:
+        """Push accumulated peripheral time into the HAL/board now.
+
+        Called at every :meth:`RealRunner.advance` boundary so board state
+        (printer busy, keyboard taps, ``board.cycles``) is current the moment
+        an advance call returns - outside callers observe the same totals as
+        with per-instruction ticking.
+        """
+        acc = self._tick_acc
+        if acc:
+            self._tick_acc = 0
+            fn = self._tick_fn
+            if fn is not None:
+                fn(acc)
 
     def irq_requested(self) -> int:
-        if self.board is not None:
-            return int(self.board.irq_requested())
-        return 0
+        """Board interrupt lines, sampled on a schedule (hot path).
+
+        The core's poll asks on *every* instruction, but the board's answer
+        is built under its lock from state that cannot disappear - a key
+        event stays unseen until observed and ``EXTRA_IRQ`` is a constant -
+        so a run of negative answers may be sampled: after ``_IRQ_SKIP``
+        consecutive zeros the next call skips the board entirely.  A raised
+        line is never cached: it is returned on the very next real poll, so
+        level-triggered behaviour is unchanged and the worst case for a fresh
+        key event is ``_IRQ_SKIP + 1`` instruction boundaries of latency.
+        """
+        skip = self._irq_skip
+        if skip:
+            # Nothing was pending when last asked; a request that appears now
+            # is an event waiting to be observed, so this only delays it by
+            # the remaining countdown - it is never dropped.
+            self._irq_skip = skip - 1
+            return 0
+        board = self.board
+        if board is None:
+            return 0
+        mask = int(board.irq_requested())
+        if not mask:
+            self._irq_skip = self._IRQ_SKIP
+        return mask
 
     def serial_write(self, byte: int) -> None:
         if self.board is not None:
@@ -234,14 +304,105 @@ class RealBus(HardwareBus):
         return False
 
 
+#: Non-control-flow instructions the vector verifier may step over between a
+#: hardware vector and the unconditional jump into its ISR body, with their
+#: byte sizes.  Anything unknown ends the walk - fail-safe: the caller falls
+#: back to honest per-instruction counting instead of assuming a chain.
+_STRAIGHT_PREFIX_SIZES: Dict[int, int] = {
+    0x00: 1,                                  # NOP
+    0xC0: 2,                                  # PUSH direct
+    0xC2: 2,                                  # CLR bit
+    0xD2: 2,                                  # SETB bit
+    0xE4: 1,                                  # CLR A
+    0x74: 2,                                  # MOV A,#imm
+    0x75: 3,                                  # MOV direct,#imm
+    0xF5: 2,                                  # MOV direct,A
+    0x85: 3,                                  # MOV direct,direct
+    0xA2: 2,                                  # MOV C,bit
+    0x92: 2,                                  # MOV bit,C
+    0x43: 3,                                  # ORL direct,#imm
+    0x53: 3,                                  # ANL direct,#imm
+}
+
+
+def _straight_line_jump(rom: ROM, start: int, steps: int = 8) -> Optional[int]:
+    """Destination of the first *unconditional* jump after a straight run.
+
+    Steps over up to ``steps`` allowlisted non-control-flow instructions
+    starting at ``start`` and returns where the following LJMP/AJMP/SJMP
+    goes.  A conditional branch, a CALL, an unknown opcode or a run that
+    never reaches a jump returns ``None`` - the caller then counts ISR-body
+    entries where they execute instead of assuming the chain.
+    """
+    pc = start
+    for _ in range(steps):
+        op = rom.byte(pc)
+        if op == 0x02:                                   # LJMP addr16
+            return (rom.byte(pc + 1) << 8) | rom.byte(pc + 2)
+        if (op & 0x1F) == 0x01:                          # AJMP addr11
+            return ((op & 0xE0) << 3 | rom.byte(pc + 1)) & 0xFFFF
+        if op == 0x80:                                   # SJMP rel8
+            rel = rom.byte(pc + 1)
+            return (pc + 2 + (rel - 0x100 if rel > 0x7F else rel)) & 0xFFFF
+        size = _STRAIGHT_PREFIX_SIZES.get(op)
+        if size is None:
+            return None
+        pc += size
+    return None
+
+
+def _vector_reaches(rom: ROM, vector: int, body: int, hops: int = 4) -> bool:
+    """True iff ``vector`` falls *unconditionally* into ``body``.
+
+    Follows only straight-line prefixes and unconditional jumps (see
+    :func:`_straight_line_jump`); any conditional branch ends the walk with
+    ``False``.  On the dumped image this is **True** for Timer-0 (vector CPU
+    ``0x000B``: ``CLR EA; PUSH ACC; CLR A; LJMP 0x02D9`` - one dispatch is
+    exactly one mux-body entry) and **False** for Timer-1 (its chain branches
+    on ``JNB`` at CPU ``0x00C1``).
+    """
+    pc = vector
+    for _ in range(hops):
+        if pc == body:
+            return True
+        nxt = _straight_line_jump(rom, pc)
+        if nxt is None:
+            return False
+        pc = nxt
+    return pc == body
+
+
 class _WatchedCPU(CPU8051):
     """The core plus two honest counters (vector dispatches, body entries).
 
     ``_poll_interrupts`` records *where the hardware vector actually went*
     (a dispatch to CPU ``0x000B`` is a real Timer-0 interrupt, ``0x001B`` a
-    real Timer-1 one); ``_execute`` records entries into the two ISR bodies
-    at their CPU-space addresses.  ``CPU8051.run``/``run_steps`` resolve
-    both hooks through ``self``, so the counters work on the hot path too.
+    real Timer-1 one): the CPU only moves ``pc`` inside that method, and only
+    to a hardware vector, so ``pc`` changed and in :data:`VECTORS` *is* a
+    dispatch.  Body entries (``mux_calls``/``timer1_calls``) are decided once
+    against the executing image instead of hooking ``_execute`` - that hook
+    ran on **every** instruction and was the single biggest recover-side
+    cost:
+
+    * **Timer-0**: the vector's own bytes are a straight-line prefix ending
+      in ``LJMP 0x02D9`` (verified by :func:`_vector_reaches` on this ROM at
+      construction), so each dispatch is exactly one entry into the mux body
+      and is counted at the dispatch site;
+    * **Timer-1**: the chain branches (``JNB`` at CPU ``0x00C1``), so an
+      entry cannot be derived from the dispatch; it is *observed* instead -
+      after each poll the PC stands at the body's first instruction exactly
+      when the body is about to execute it, which is the same instant the
+      per-instruction hook counted (for entries taken while interrupts are
+      enabled - the only entries this firmware can produce: Timer-1 never
+      even starts, so ``stats()`` reports the honest 0 either way);
+    * if the Timer-0 chain cannot be verified on some other image, the
+      original per-instruction counting is installed (``_execute_counted``)
+      for both bodies and nothing is assumed.
+
+    ``CPU8051.run``/``run_steps``/``step`` resolve both hooks through
+    ``self``, so the counters work on the hot path too.  On this dump the
+    fast path was checked against the per-instruction counting over
+    500k/600k-cycle runs - identical numbers.
     """
 
     def __init__(self, rom: ROM, bus=None) -> None:
@@ -250,18 +411,77 @@ class _WatchedCPU(CPU8051):
         #: body entry address (CPU space) -> execution count
         self.body_entries: Dict[int, int] = {}
         super().__init__(rom, bus)
+        # Bind the base methods once: zero-arg super() on every instruction
+        # is a measurable cost on a ~100k/s hot path.
+        self._base_poll = super()._poll_interrupts
+        self._base_execute = super()._execute
+        tf0_ok = _vector_reaches(rom, VEC_TF0, CPU_ISR_TIMER0)
+        self._tf0_at_dispatch = tf0_ok
+        self._tf1_at_dispatch = tf0_ok and _vector_reaches(
+            rom, VEC_TF1, CPU_ISR_TIMER1)
+        self._observe_tf1 = tf0_ok and not self._tf1_at_dispatch
+        if not tf0_ok:
+            # Unverifiable chain on this image: count entries where they
+            # actually execute (the original per-instruction hook).
+            self._execute = self._execute_counted
 
-    def _poll_interrupts(self) -> None:
-        before = self.pc
-        super()._poll_interrupts()
-        if self.pc != before and self.pc in VECTORS:
-            self.vector_dispatches[self.pc] = self.vector_dispatches.get(self.pc, 0) + 1
-
-    def _execute(self) -> int:
+    def _execute_counted(self) -> int:
+        """Fallback body counting: one check per instruction (original path)."""
         pc = self.pc
         if pc == CPU_ISR_TIMER0 or pc == CPU_ISR_TIMER1:
-            self.body_entries[pc] = self.body_entries.get(pc, 0) + 1
-        return super()._execute()
+            d = self.body_entries
+            d[pc] = d.get(pc, 0) + 1
+        return self._base_execute()
+
+    def _poll_interrupts(self) -> None:
+        """Dispatch watcher around the core's own poll (hot path).
+
+        Kept deliberately thin - one PC read on entry, the core's poll, then
+        the counting branch - because it runs on *every* instruction.  A poll
+        that did not move ``pc`` performed no dispatch; the only thing left
+        to recognise there is the refresh body standing at its first
+        instruction (the Timer-1 entry observation), one integer compare.
+        """
+        before = self.pc
+        self._base_poll()
+        pc = self.pc
+        if pc != before:
+            if pc in VECTORS:
+                d = self.vector_dispatches
+                d[pc] = d.get(pc, 0) + 1
+                if pc == VEC_TF0:
+                    if self._tf0_at_dispatch:
+                        b = self.body_entries
+                        b[CPU_ISR_TIMER0] = b.get(CPU_ISR_TIMER0, 0) + 1
+                elif pc == VEC_TF1 and self._tf1_at_dispatch:
+                    b = self.body_entries
+                    b[CPU_ISR_TIMER1] = b.get(CPU_ISR_TIMER1, 0) + 1
+        elif pc == CPU_ISR_TIMER1 and self._observe_tf1:
+            # No dispatch: the PC has arrived at the refresh body's first
+            # instruction, which executes next - the entry itself.
+            b = self.body_entries
+            b[CPU_ISR_TIMER1] = b.get(CPU_ISR_TIMER1, 0) + 1
+
+
+class _CpuSpaceROM(ROM):
+    """Execution copy produced by :func:`_cpu_space_rom`.
+
+    ``load_block`` writes **every** address ``0x0000..0x7FFF`` (gaps in the
+    source read back as ``0xFF``, the erased-EPROM value, but the keys are
+    present), so membership is exactly ``addr & 0xFFFF < 0x8000`` - and the
+    run loop probes it once per instruction, where a range test beats the
+    32 KiB dict lookup measurably (~2.5% of recovered throughput in an
+    in-process A/B).  The upper half is *defined* to stay unmapped: a fetch
+    there must halt with the honest "missing image" error even if bytes were
+    stacked onto this private copy (see the module docstring), so this
+    override never contradicts the runner's contract.  Everything else
+    (``byte``, coverage, stacking) inherits the sparse-ROM semantics.
+    """
+
+    __slots__ = ()
+
+    def is_mapped(self, addr: int) -> bool:
+        return (addr & 0xFFFF) < 0x8000
 
 
 def _cpu_space_rom(source: ROM) -> ROM:
@@ -277,7 +497,7 @@ def _cpu_space_rom(source: ROM) -> ROM:
         base = 0x0000
     else:
         base = 0x8000
-    rom = ROM("realrun-cpu")
+    rom = _CpuSpaceROM("realrun-cpu")
     rom.load_block(0x0000, source.get_slice(base, 0x8000))
     return rom
 
@@ -354,7 +574,8 @@ class RealRunner:
         """Execute the real firmware for ``cycles`` machine cycles.
 
         Returns the number of *new interrupt vector dispatches* made in this
-        call.  Peripherals tick from the core's own cycle accounting; nothing
+        call.  Peripherals tick from the core's own cycle accounting -
+        accumulated on the bus and flushed at this call's boundary - nothing
         is scheduled from the outside.  Stops early (honestly) if the core
         halts - e.g. on a fetch from the undumped upper half.
         """
@@ -371,6 +592,9 @@ class RealRunner:
             budget -= quantum
             if executed <= 0 and not cpu.halted:
                 break                              # stuck core: never hot-spin
+        # Board time accumulated during the slice becomes visible now, so
+        # every observer between advance() calls sees current peripheral state.
+        self.bus.flush_tick()
         if cpu.halted and not self.halted:
             self._halt(cpu.error or f"cpu stopped at 0x{cpu.pc:04X}")
         if self.hal is not None:
@@ -524,30 +748,57 @@ def diagnose_consumers(program: Program, rom: Optional[ROM] = None) -> Dict[str,
     # 2. who writes the display buffer
     buffer_names = [f"DAT_INTMEM_5{i:x}" for i in range(16)]
     writers: Dict[str, List[str]] = {}
+    # Compile the 16 patterns once: pairing each body with an f-string used
+    # to build (and cache-thrash) a fresh regex per function x name - about
+    # 2000 re.search calls and ~0.5 s of the boot profile.  The substring
+    # prefilter is exact: a pattern match contains ``name``, and so does the
+    # ``&name`` alternative, so a body without ``name`` cannot match.
+    compiled = {name: re.compile(rf"(?:&|\b){name}\b\s*=[^=]")
+                for name in buffer_names}
     for func in functions:
+        body = func.body
         for name in buffer_names:
-            if re.search(rf"(?:&|\b){name}\b\s*=[^=]", func.body) or f"&{name}" in func.body:
+            if name not in body:
+                continue
+            if compiled[name].search(body) or f"&{name}" in body:
                 writers.setdefault(name, []).append(func.name)
     buffer_funcs = sorted({name for names in writers.values() for name in names})
     reachable_from_isr = _reachable(edges, ISR_TIMER1)
+    # name -> function once, instead of a linear rescan per lookup
+    by_name = {f.name: f for f in functions}
+
+    def _address_of(fname: str) -> int:
+        func = by_name.get(fname)
+        return int(func.address) if func is not None else 0
+
     buffer_callers = sorted({
         caller for fname in buffer_funcs
-        for caller in callers_of(int(next(
-            (f.address for f in functions if f.name == fname), 0)))
+        for caller in callers_of(_address_of(fname))
     })
     buffer_reachable = sorted(
         fname for fname in buffer_funcs
-        if int(next(f.address for f in functions if f.name == fname)) in reachable_from_isr
+        if _address_of(fname) in reachable_from_isr
     )
 
     # 3. keyboard page readers: ``MOV DPH,#91h`` sites are in the *image*
     keyboard_sites: List[str] = []
     if rom is not None:
         pattern = bytes((0x75, 0x83, 0x91))          # MOV DPH,#91h
-        keyboard_sites = [
-            hex(addr) for addr in range(0x8000, 0xFFFD)
-            if rom.get_slice(addr, 3) == pattern
-        ]
+        flat = getattr(rom, "flat", None)
+        if isinstance(flat, (bytes, bytearray)):
+            # One C-level sweep of the mirrored read view instead of 32765 x
+            # get_slice (each building a generator plus a bytes object).
+            # The window matches the old range(0x8000, 0xFFFD) scan exactly.
+            stop = 0xFFFC + len(pattern)
+            index = flat.find(pattern, 0x8000, stop)
+            while index != -1:
+                keyboard_sites.append(hex(index))
+                index = flat.find(pattern, index + 1, stop)
+        else:
+            keyboard_sites = [
+                hex(addr) for addr in range(0x8000, 0xFFFD)
+                if rom.get_slice(addr, 3) == pattern
+            ]
     keyboard_functions = sorted({
         name for site in keyboard_sites
         for name in [covering(int(site, 16))] if name is not None
@@ -558,7 +809,7 @@ def diagnose_consumers(program: Program, rom: Optional[ROM] = None) -> Dict[str,
         "dump_functions": keyboard_functions,
         "reachable_from_timer1": sorted(
             name for name in keyboard_functions
-            if next(f.address for f in functions if f.name == name) in reachable_from_isr
+            if _address_of(name) in reachable_from_isr
         ),
         "verdict": (
             "every MOV DPH,#91h site sits in the Timer-1 path (the scanner "

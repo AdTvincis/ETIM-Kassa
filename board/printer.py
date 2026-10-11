@@ -314,6 +314,10 @@ class ReceiptPrinter:
             return self._busy > 0
 
     def tick(self, cycles: int) -> None:
+        # Горячий путь (зовётся почти на каждой инструкции): пока принтер
+        # не занят, дешёвое чтение атомарно под GIL и замок не нужен.
+        if not self._busy:
+            return
         with self._lock:
             if self._busy:
                 self._busy = max(0, self._busy - int(cycles))

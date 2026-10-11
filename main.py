@@ -244,6 +244,18 @@ class EmulationThread(threading.Thread):
     Эмулятор считает машинные циклы (1 МГц при кварце 12 МГц), а поток
     дозирует их по стенным часам, чтобы поведение кассы было похоже на
     настоящее, и чтобы интерфейс успевал перерисовываться.
+
+    Темпинг (проверено замерами): ``cycles_per_budget`` = 20 000 циклов =
+    20 мс эмулируемого времени за кадр.
+
+    * ядро **быстрее** реального времени -> спим остаток кадра, ровно
+      1M циклов/с настенных часах;
+    * ядро **медленнее** -> ``delay <= 0`` и ``next_time`` сбрасывается на
+      «сейчас»: накопленного долга и «погоняющих» серий ``run_budget``
+      подряд не бывает - кадры идут просто один за другим;
+    * между кадрами ``session.run()`` (recovered) отпускает замок на каждом
+      срезе (:data:`recover.session.LOCK_SLICE_CYCLES`), поэтому даже
+      непрерывная серия кадров не блокирует Tk-поток.
     """
 
     def __init__(self, backend: Backend, budget_ms: int = 20) -> None:
@@ -308,10 +320,31 @@ def run_headless(backend: Backend, seconds: float, verbose: bool = True) -> dict
     return {"status": status, "errors": list(thread.errors)}
 
 
+#: Интервал переключения GIL для GUI-режима (сек).  См. tune_gil_for_gui().
+GUI_GIL_SWITCH_INTERVAL = 0.0005
+
+
+def tune_gil_for_gui() -> None:
+    """Подготовить GIL к совместной работе Tk и потока эмуляции.
+
+    Каждый вызов в Tcl (``StringVar.set``, канва, ``Text``) отпускает GIL, а
+    после возвращения поток ждёт освобождения GIL от потока эмуляции до
+    ``sys.getswitchinterval()`` - по умолчанию это до 5 мс **на каждый**
+    Tcl-вызов.  Замер (tools/_bench_perf_ui.py): при 5 мс один refresh под
+    нагрузкой стоил ~58 мс (3 вызова Tcl), полная перерисовка канвы
+    индикатора - ~2.7 с (сотни ``create_rectangle``); при 0.5 мс - 0.25 мс и
+    ~18 мс, а пропускная способность эмуляции не падает (~150К циклов/с).
+    Короткий интервал делает GUI отзывчивым, не мешая фоновой эмуляции.
+    """
+    sys.setswitchinterval(GUI_GIL_SWITCH_INTERVAL)
+
+
 def run_gui(backend: Backend) -> int:
     import tkinter as tk
 
     from ui.app import CashRegisterApp
+
+    tune_gil_for_gui()
 
     root_holder: dict = {}
 
@@ -319,6 +352,10 @@ def run_gui(backend: Backend) -> int:
         thread.stop()
 
     app = CashRegisterApp(backend, title="ЭТИМ — Касса", on_quit=on_quit)
+    # Один таймер обновления: темп задаёт хост (tick ниже), поэтому
+    # внутренний таймер приложения выключаем - иначе refresh() выполнялся
+    # бы дважды за интервал (двойной опрос платы и двойная работа Tk).
+    app.stop_auto_refresh()
     thread = EmulationThread(backend)
     thread.start()
 
@@ -329,6 +366,8 @@ def run_gui(backend: Backend) -> int:
         return 2
     root_holder["root"] = root
 
+    # 50 мс: измеренный cost refresh() <= 1 мс (пока текст не менялся) и
+    # <= ~3-5 мс при изменении - интервал менять незачем.
     def tick() -> None:
         try:
             app.refresh()
@@ -411,11 +450,62 @@ def cmd_selftest() -> int:
             print(f"  FAIL  {label}: {type(exc).__name__}: {exc}")
     try:
         import tkinter
-        tkinter.Tk().destroy()
+        _probe = tkinter.Tk()
+        _probe.withdraw()               # никаких ВИДИМЫХ окон (заказ пользователя)
+        _probe.destroy()
         print("  ok    tkinter (окно создаётся)")
     except Exception as exc:                      # noqa: BLE001
         print(f"  warn  tkinter: {exc} (графический режим недоступен)")
     return 0 if ok else 1
+
+
+def _show_splash():
+    """Мгновенное окно «загрузка…» для GUI-режима (до сборки бэкенда).
+
+    ``make_backend("recovered")`` занимает ~2-3 с (разбор дампа прошивки:
+    parse_body ~1.2 с, diagnose_consumers ~0.35 с, остальное - импорты и
+    загрузка ROM), и раньше окно появлялось только ПОСЛЕ этой паузы -
+    «запускаю - ничего не происходит».  Сплэш рисуется сразу и закрывается
+    перед созданием основного окна (Tk не терпит два корневых окна).
+    Никогда не бросает: без дисплея просто возвращается ``None``.
+    """
+    try:
+        import tkinter as tk
+    except Exception:                              # noqa: BLE001
+        return None
+    try:
+        splash = tk.Tk()
+        splash.title("ЭТИМ — Касса")
+        bg = "#101010"
+        splash.configure(bg=bg)
+        width, height = 440, 130
+        splash.geometry("%dx%d+%d+%d" % (
+            width, height,
+            max(0, (splash.winfo_screenwidth() - width) // 2),
+            max(0, (splash.winfo_screenheight() - height) // 2),
+        ))
+        tk.Label(
+            splash, text="КАССА «ЭТИМ»",
+            bg=bg, fg="#d8d8a0", font=("TkDefaultFont", 16, "bold"),
+        ).pack(pady=(24, 6))
+        tk.Label(
+            splash, text="загрузка прошивки…",
+            bg=bg, fg="#7fc97f", font=("TkDefaultFont", 11),
+        ).pack()
+        splash.update_idletasks()
+        splash.update()
+        return splash
+    except Exception:                              # noqa: BLE001
+        return None
+
+
+def _close_splash(splash) -> None:
+    if splash is None:
+        return
+    try:
+        splash.destroy()
+    except Exception:                              # noqa: BLE001
+        pass
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -425,15 +515,23 @@ def main(argv: Optional[list] = None) -> int:
     if args.selftest:
         return cmd_selftest()
 
+    # GUI: окно «загрузка…» рисуем ДО дорогой сборки бэкенда
+    splash = None if args.headless > 0 else _show_splash()
     try:
         backend = make_backend(args.backend, args)
     except Exception as exc:                      # noqa: BLE001
+        _close_splash(splash)
         print(f"не удалось запустить '{args.backend}': {exc}", file=sys.stderr)
         print("попробуйте: python main.py --list", file=sys.stderr)
         print("или:       python main.py --backend demo51", file=sys.stderr)
         return 2
 
-    print(f"бэкенд: {backend.name} — {getattr(backend, 'description', '')}")
+    # flush=True: при перенаправлении stdout (``python main.py > out.txt``)
+    # буфер держит строку до выхода; печатаем сразу, чтобы лог запуска был
+    # виден ещё до закрытия окна.
+    print(f"бэкенд: {backend.name} — {getattr(backend, 'description', '')}",
+          flush=True)
+    _close_splash(splash)
     if args.headless > 0:
         result = run_headless(backend, args.headless)
         return 0 if not result["errors"] else 1

@@ -237,14 +237,20 @@ class CashRegisterBoard(HardwareBus):
 
     # ================================================================= time
     def tick(self, cycles: int) -> None:
-        with self._lock:
-            self.cycles += int(cycles)
-            self.printer.tick(cycles)
-            self.keyboard.tick(cycles)
-            if self._int0_hold > 0:
-                self._int0_hold = max(0, self._int0_hold - int(cycles))
-            if self._busy_until and self.cycles >= self._busy_until:
-                self.busy = False
+        # Горячий путь: tick зовётся почти на каждой машинной инструкции
+        # (см. tools/_bench.py: 200K+ вызовов за 266K инструкций), поэтому
+        # здесь НЕ берётся общий замок: cycles/busy/_int0_hold пишет только
+        # поток эмуляции, а GUI читает атомарными атрибутами.  Замок нужен
+        # только там, где состояние реально разделяется (истечение тапа
+        # клавиатуры — внутри Keyboard.tick).
+        cycles = int(cycles)
+        self.cycles += cycles
+        if self._int0_hold > 0:
+            self._int0_hold = max(0, self._int0_hold - cycles)
+        if self._busy_until and self.cycles >= self._busy_until:
+            self.busy = False
+        self.printer.tick(cycles)
+        self.keyboard.tick(cycles)
 
     def note_pc(self, pc: int) -> None:
         """Cheap hook so :meth:`status` can report the CPU's PC."""
@@ -503,18 +509,24 @@ class CashRegisterBoard(HardwareBus):
         observed.  Only the CPU core and tests call this (``main.py`` does
         not), so consumption on observation cannot steal the event from a
         third-party reader.
+
+        Hot path (tools/_bench.py): deliberately lock-free.  ``_int0_hold``
+        and ``_seen_events`` are written only by the emulation thread (this
+        method + ``tick``), every other read is an int/bool attribute or the
+        wiring dict, which the GIL serves atomically; GUI threads only store
+        ``keyboard.event_count`` (an int).
         """
-        with self._lock:
-            mask = 0
-            if (self.wiring["INT0_ON_KEYPRESS"]
-                    and self.keyboard.event_count != self._seen_events):
-                self._seen_events = self.keyboard.event_count
-                self._int0_hold = int(self.wiring["INT0_HOLD_CYCLES"])
-            if self._int0_hold > 0:
-                mask |= IRQ_INT0
-                self._int0_hold = 0            # pulse consumed by this poll
+        if (self.wiring["INT0_ON_KEYPRESS"]
+                and self.keyboard.event_count != self._seen_events):
+            self._seen_events = self.keyboard.event_count
+            self._int0_hold = int(self.wiring["INT0_HOLD_CYCLES"])
+        mask = 0
+        if self._int0_hold > 0:
+            mask |= IRQ_INT0
+            self._int0_hold = 0            # pulse consumed by this poll
+        if self.wiring["EXTRA_IRQ"]:
             mask |= int(self.wiring["EXTRA_IRQ"])
-            return mask
+        return mask
 
     # ================================================================ serial
     def serial_write(self, byte: int) -> None:
@@ -590,8 +602,12 @@ class CashRegisterBoard(HardwareBus):
     # ========================================================= diagnostics
     def _record(self, addr: int, value: int, kind: str) -> None:
         self.writes.append((self.cycles, kind, addr, value))
-        if len(self.writes) > self.trace_limit:
-            del self.writes[: len(self.writes) - self.trace_limit]
+        # Пакетная усечка: трим по одному элементу после заполнения стоил
+        # memmove всего списка (O(trace_limit)) на КАЖДУЮ запись — срезаем
+        # пачкой, когда переполнение уже велико (бенчмарк tools/_bench.py).
+        n = len(self.writes)
+        if n > self.trace_limit + 512:
+            del self.writes[: n - self.trace_limit]
 
     def status(self) -> Dict[str, object]:
         """State for the UI status bar (contract extension, optional)."""

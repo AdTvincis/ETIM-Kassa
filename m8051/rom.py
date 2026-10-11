@@ -56,6 +56,14 @@ class _Mapped(dict):
         super().__init__()
         self.flat = bytearray(b"\xFF" * (self._MIRROR + 3))
 
+    def clear(self) -> None:
+        """dict.clear() не проходит через ``__delitem__`` — плоский буфер
+        остался бы со старыми байтами.  Rebase (``rebase_low32k``) полагается
+        на чистку: после сдвига верхняя половина обязана читаться как 0xFF."""
+        dict.clear(self)
+        flat = self.flat
+        flat[:] = b"\xFF" * len(flat)
+
     def __setitem__(self, addr, value) -> None:
         addr &= 0xFFFF
         value &= 0xFF
@@ -80,10 +88,14 @@ class ROM:
     which is what a blank device actually does.
     """
 
-    __slots__ = ("_mem", "name", "mapped")
+    __slots__ = ("_mem", "name", "mapped", "flat")
 
     def __init__(self, name: str = "rom") -> None:
         self._mem = _Mapped()
+        # Плоское представление: объект bytearray живёт всю жизнь ROM
+        # (_Mapped никогда не подменяется), поэтому кэш ссылки безопасен и
+        # снимает property-вызов на КАЖДОЙ инструкции (cpu._execute).
+        self.flat = self._mem.flat
         self.name = name
 
     # ------------------------------------------------------------------ build
@@ -153,14 +165,9 @@ class ROM:
         return gaps
 
     # ----------------------------------------------------------------- access
-    @property
-    def flat(self) -> bytearray:
-        """The mirrored 64 KiB + 3 read view (see :class:`_Mapped`).
-
-        The CPU core binds this bytearray's ``__getitem__`` as its fetch
-        function, which avoids a Python-level method call per operand read.
-        """
-        return self._mem.flat
+    # NB: ``flat`` — обычный атрибут, заданный в __init__ (а не property):
+    # cpu._execute читает его на каждой инструкции, property стоила вызова на
+    # каждый фетч; зеркало +3 байта см. в :class:`_Mapped`.
 
     def __getitem__(self, addr: int) -> int:
         return self._mem.flat[addr & 0xFFFF]
@@ -172,7 +179,16 @@ class ROM:
         return self.byte(addr) << 8 | self.byte(addr + 1)
 
     def get_slice(self, start: int, length: int) -> bytes:
-        return bytes(self.byte(start + i) for i in range(length))
+        # Один срез плоского представления вместо покадрового byte() на каждый
+        # байт: get_slice зовётся сканерами MOVC десятками тысяч раз за бут
+        # (cProfile: 32K вызовов, 0.27s только на генexpr).  Семантика та же:
+        # адрес маскируется, несопоставленные байты читаются как 0xFF.
+        flat = self._mem.flat
+        start &= 0xFFFF
+        end = start + int(length)
+        if end <= 0x10000:
+            return bytes(flat[start:end])
+        return bytes(flat[start:0x10000]) + bytes(flat[0:end - 0x10000])
 
     def __len__(self) -> int:
         return len(self._mem)

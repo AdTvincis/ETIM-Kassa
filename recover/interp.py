@@ -1173,6 +1173,9 @@ class FunctionLibrary:
                 self.failed[fn.name] = f"{type(exc).__name__}: {exc}"
                 continue
             declarations, labels, parents = _collect(ast)
+            # классификация (stub/partial/prefix) считается по УЖЕ разобранному
+            # AST — иначе baddata_info() распарсил бы тело заново (~2.3 с бута)
+            fn.preload_baddata(ast)
             recovered = RecoveredFunction(
                 name=fn.name,
                 address=fn.address,

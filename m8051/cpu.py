@@ -48,6 +48,25 @@ SFR_CCAP4L, SFR_CCAP4H = 0xEE, 0xFE
 SFR_WDTRST = 0xA6
 SFR_WDTPRG = 0xA7
 
+# ---------------------------------------------------------------- batching
+# Servicing the timers/board once per *instruction* dominated the profile
+# (~33% of total time: 204K ``_do_peripherals`` calls for 266K instructions,
+# each one crossing into ``bus.tick`` and the board's locks).  The timer math
+# already takes a cycle delta, so the run loop may hold back up to
+# ``_PERIPH_BATCH`` machine cycles and push them in one call: totals are
+# preserved exactly, only the *visibility* of a freshly set TF0/TF1 (or a
+# board edge) moves by at most ``_PERIPH_BATCH`` cycles - far below the
+# 1844-cycle mux period the firmware tests assert on.  Every API boundary
+# (``step``/``run``/``run_steps``) and every direct access to a timer or
+# interrupt SFR flushes first, so software never observes stale state.
+_PERIPH_BATCH = 8
+
+#: Direct addresses whose *current* value software must observe: flush the
+#: batched cycles before reading or writing any of them.  Ports, ACC, PSW and
+#: plain RAM are deliberately absent - they do not depend on elapsed time.
+_FLUSH_SFRS = frozenset((SFR_TCON, SFR_TMOD, SFR_TL0, SFR_TL1, SFR_TH0,
+                         SFR_TH1, SFR_SCON, SFR_SBUF, SFR_IE, SFR_IP))
+
 # Port bit masks
 _PORT_MASKS = (-1, -1, -1, -1)
 
@@ -177,6 +196,7 @@ class CPU8051:
         "watchdog", "wd_enabled", "pll_locked", "op_count", "idle",
         "serial_in", "t2_running", "pca_running", "_port_latch",
         "timers_on", "_serial_rx", "_pending_tick", "missing_pc",
+        "_periph_pending", "_irq_scan",
     )
 
     def __init__(self, rom: ROM, bus: Optional[HardwareBus] = None) -> None:
@@ -203,6 +223,7 @@ class CPU8051:
         self.timers_on = False
         self._serial_rx = False
         self._pending_tick = 0
+        self._periph_pending = 0
         self._port_latch = bytearray(4)
         self.reset()
 
@@ -231,6 +252,8 @@ class CPU8051:
         self.timers_on = False
         self._serial_rx = False
         self._pending_tick = 0
+        self._periph_pending = 0
+        self._irq_scan = True          # после сброса первый опрос обязателен
 
     # ----------------------------------------------------------------- helpers
     @property
@@ -327,6 +350,9 @@ class CPU8051:
     def _dir_read(self, addr: int) -> int:
         if addr < 0x80:
             return self.ram[addr]
+        if addr in _FLUSH_SFRS:
+            # a timer/interrupt register: hand the software an exact value
+            self._flush_peripherals()
         return self.sfr[addr]
 
     def _dir_write(self, addr: int, value: int) -> None:
@@ -348,6 +374,13 @@ class CPU8051:
             self.sfr[addr] = value
             self.bus.port_write(port, value)
             return
+        if addr in _FLUSH_SFRS:
+            # cycles still batched for the OLD timer/interrupt configuration
+            # must be accounted before the new value takes effect (otherwise
+            # they would be charged to a timer the firmware just stopped or
+            # reloaded); the write may also ENABLE an IRQ source -> rescan
+            self._flush_peripherals()
+            self._irq_scan = True
         self.sfr[addr] = value
         if addr == SFR_SBUF:
             self.bus.serial_write(value)
@@ -370,18 +403,43 @@ class CPU8051:
 
     # -------------------------------------------------------------------- time
     def _advance(self, cycles: int) -> None:
-        """Run timers/serial/peripherals for ``cycles`` machine cycles."""
+        """Run timers/serial/peripherals for ``cycles`` machine cycles.
+
+        While a timer (or the watchdog, or serial reception) is running the
+        work is *batched*: cycles accumulate in ``_periph_pending`` until
+        ``_PERIPH_BATCH`` of them are due, then one ``_do_peripherals`` call
+        spends them all.  The arithmetic is identical - ``_tick_timer`` takes
+        an arbitrary delta - so counters, overflows and ``bus.tick`` totals
+        are unchanged; only flag/edge *visibility* moves by less than one
+        batch.  Nothing leaves a ``run``/``run_steps``/``step`` call with a
+        batch still pending (see :meth:`_flush_peripherals`).
+        """
         self.cycles += cycles
         self.op_count += 1
         if self.timers_on or self.wd_enabled or self._serial_rx:
-            self._do_peripherals(cycles)
+            pending = self._periph_pending + cycles
+            if pending >= _PERIPH_BATCH:
+                self._periph_pending = 0
+                self._do_peripherals(pending)
+            else:
+                self._periph_pending = pending
         elif self._pending_tick:
             self._pending_tick += cycles
             if self._pending_tick >= 32:
                 self.bus.tick(self._pending_tick)
                 self._pending_tick = 0
+                # без таймеров это единственная граница, на которой могло
+                # появиться событие платы (нажатие) -> просим опрос
+                self._irq_scan = True
         else:
             self._pending_tick = cycles
+
+    def _flush_peripherals(self) -> None:
+        """Push batched machine cycles into the timers/board immediately."""
+        pending = self._periph_pending
+        if pending:
+            self._periph_pending = 0
+            self._do_peripherals(pending)
 
     @staticmethod
     def _tick_timer(mode: int, th: int, tl: int, cycles: int):
@@ -477,6 +535,8 @@ class CPU8051:
             self.watchdog += cycles
             if self.watchdog > 0x20000:
                 self.watchdog = 0
+        # Timer/serial flags may have just changed -> the run loops must poll.
+        self._irq_scan = True
 
     # ------------------------------------------------------------ interrupts
     def _poll_interrupts(self) -> None:
@@ -551,10 +611,12 @@ class CPU8051:
             return 1
         if self.idle:
             self._advance(1)
+            self._flush_peripherals()
             return 1
         self._poll_interrupts()
         cycles = self._execute()
         self._advance(cycles)
+        self._flush_peripherals()      # single-step API: leave exact state
         return cycles
 
     def run_steps(self, max_steps: int) -> int:
@@ -564,26 +626,34 @@ class CPU8051:
         # the common case (interrupts globally disabled) so _poll_interrupts
         # is only entered when there is something to poll.
         sfr = self.sfr
-        mapped = self.rom.is_mapped
+        mem = self.rom._mem             # `pc in mem` инлайн, без вызова метода
         poll = self._poll_interrupts
         advance = self._advance
         execute = self._execute
         while executed < max_steps:
             if self.halted:
                 break
-            if not mapped(self.pc):
-                self.missing_pc = self.pc
+            pc = self.pc
+            if pc not in mem and (pc & 0xFFFF) not in mem:
+                # семантика rom.is_mapped (маска на случай PC у верха)
+                self.missing_pc = pc
                 self.halted = True
-                self.error = (f"fetch from unmapped code address 0x{self.pc:04X} "
+                self.error = (f"fetch from unmapped code address 0x{pc:04X} "
                               f"- this part of the firmware image is missing")
                 break
             if self.idle:
                 advance(1)
             else:
-                if sfr[SFR_IE] & 0x80:
+                # Опрос по флагу _irq_scan: источники pending меняются только
+                # на границе _do_peripherals/записи в SFR прерываний (там флаг
+                # и выставляется) — опрос на каждую инструкцию стоил ~22%
+                # recovered-пути (cProfile: 342K вызовов).  См. run().
+                if self._irq_scan and sfr[SFR_IE] & 0x80:
+                    self._irq_scan = False
                     poll()
                 advance(execute())
             executed += 1
+        self._flush_peripherals()      # the batch is owed to timers/board
         return executed
 
     def run(self, cycles: int) -> int:
@@ -591,37 +661,67 @@ class CPU8051:
         executed = 0
         target = self.cycles + cycles if cycles > 0 else -1
         execute = self._execute
-        advance = self._advance
-        mapped = self.rom.is_mapped
+        mem = self.rom._mem             # `pc in mem` инлайн, без вызова метода
         poll = self._poll_interrupts
         sfr = self.sfr
+        batch = _PERIPH_BATCH
+        # Тело _advance ИНЛАЙНено ниже (метод-вызов на каждой инструкции
+        # стоил ~4%); держать в синхроне с _advance — run_steps его зовёт.
         while True:
             if self.halted:
                 break
             if self.idle:
-                advance(1)
+                self._advance(1)
             else:
-                if sfr[SFR_IE] & 0x80:
+                # Гейт по _irq_scan (см. run_steps): опрос только когда могло
+                # появиться событие — таймерный флаг/связь/линия платы на
+                # границе flush либо запись в SFR прерываний.
+                if self._irq_scan and sfr[SFR_IE] & 0x80:
+                    self._irq_scan = False
                     poll()
-                advance(execute())
+                c = execute()
+                self.cycles += c
+                self.op_count += 1
+                if self.timers_on or self.wd_enabled or self._serial_rx:
+                    pending = self._periph_pending + c
+                    if pending >= batch:
+                        self._periph_pending = 0
+                        self._do_peripherals(pending)
+                    else:
+                        self._periph_pending = pending
+                elif self._pending_tick:
+                    self._pending_tick += c
+                    if self._pending_tick >= 32:
+                        self.bus.tick(self._pending_tick)
+                        self._pending_tick = 0
+                        self._irq_scan = True
+                else:
+                    self._pending_tick = c
             executed += 1
             if target >= 0 and self.cycles >= target:
                 break
             if executed >= 400_000_000:
                 break
-            if not mapped(self.pc):
-                self.missing_pc = self.pc
+            pc = self.pc
+            if pc not in mem and (pc & 0xFFFF) not in mem:
+                # семантика rom.is_mapped (маска на случай PC у верха)
+                self.missing_pc = pc
                 self.halted = True
-                self.error = (f"fetch from unmapped code address 0x{self.pc:04X} "
+                self.error = (f"fetch from unmapped code address 0x{pc:04X} "
                               f"- this part of the firmware image is missing")
                 break
+        self._flush_peripherals()      # the batch is owed to timers/board
         return executed
 
     # --------------------------------------------------------------- execution
     def _execute(self) -> int:
-        rom = self.rom
-        pc = self.pc
-        self.last_op = rom.byte(pc)
+        # Фетч через плоский bytearray (зеркало +3 покрывает p..p+2 при PC у
+        # верха пространства) вместо rom.byte(): метод-вызов + маска на каждый
+        # операнд стоили ~2 вызова на инструкцию (cProfile demo51: 729K вызовов
+        # rom.byte на 393K инструкций).  pc маскируется один AND'ом на входе.
+        flat = self.rom.flat
+        pc = self.pc & 0xFFFF
+        self.last_op = flat[pc]
         trace = self.trace
         if trace is not None:
             if len(trace) < self.trace_limit:
@@ -631,7 +731,7 @@ class CPU8051:
                 self.trace = None
         p = pc + 1
         op = self.last_op
-        romb = rom.byte
+        romb = flat.__getitem__
         sfr = self.sfr
         ram = self.ram
         bus = self.bus
@@ -681,15 +781,16 @@ class CPU8051:
         if op == 0xE5:                                             # MOV A,direct
             self.pc = p + 1
             addr = romb(p)
-            if addr == SFR_ACC:
-                pass
-            elif addr < 0x80:
+            if addr < 0x80:
                 self.acc = ram[addr]
+            elif addr == SFR_ACC:
+                pass
             elif SFR_P0 <= addr <= SFR_P3 and (addr & 0x0F) == 0:
                 self.acc = self._port_read((addr - SFR_P0) >> 4)
-            elif addr == SFR_SBUF:
-                self.acc = self.sfr[addr]
             else:
+                if addr in _FLUSH_SFRS:
+                    # SBUF/TCON/... must not be served from a stale batch
+                    self._flush_peripherals()
                 self.acc = self.sfr[addr]
             self.set_p()
             return 1
@@ -1305,6 +1406,9 @@ class CPU8051:
             return 1 if (self._port_read((byte - SFR_P0) >> 4) & mask) else 0
         if byte < 0x80:
             return 1 if (self.ram[byte] & mask) else 0
+        if byte in _FLUSH_SFRS:
+            # TF0/TF1/RI/TI/EA are time-dependent: never show them stale
+            self._flush_peripherals()
         return 1 if (self.sfr[byte] & mask) else 0
 
     def _bit_write(self, bit: int, value: int) -> None:
@@ -1323,6 +1427,11 @@ class CPU8051:
             else:
                 self.ram[byte] &= ~mask & 0xFF
             return
+        if byte in _FLUSH_SFRS:
+            # account the batched cycles before the flag/config bit changes;
+            # the bit may ENABLE an interrupt source -> rescan IRQs
+            self._flush_peripherals()
+            self._irq_scan = True
         if value:
             self.sfr[byte] |= mask
             new = self.sfr[byte]

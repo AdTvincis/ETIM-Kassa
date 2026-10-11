@@ -9,6 +9,24 @@ The UI (``main.py``) owns a :class:`RecoveredFirmwareSession` and calls:
 Everything is guarded by one :class:`threading.RLock`, and the display/receipt
 accessors snapshot strings inside that lock, so a torn read is impossible.
 
+Latency contract (GUI)
+----------------------
+``run()`` never holds the lock for a whole budget: the real-hex path executes
+in small slices (:data:`LOCK_SLICE_CYCLES` machine cycles), releasing the lock
+*between* slices, so a Tk-thread read waits at most one slice (~1-2 ms), never
+tens of milliseconds.  On top of that the read facades (``display.text()``,
+``printer.paper()``, ``printer.is_busy()``) try a **non-blocking** acquire and,
+when a slice is mid-flight, return the snapshot refreshed at the end of the
+last slice instead of blocking; ``status()`` does the same with a cached dict.
+Both sides of the hard contract read the *same* snapshot::
+
+    status()["display"]      == display.text()
+    status()["receipt_lines"] == len(printer.paper())
+
+so it holds under load as well.  With no emulation thread running the lock is
+free, every read takes the live path, and snapshots are refreshed under the
+same lock - torn reads stay impossible.
+
 Honesty rules
 -------------
 * ``boot()`` never raises and never invents a program.  The reset vector of
@@ -30,8 +48,10 @@ Honesty rules
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .errors import MissingFirmware
@@ -68,6 +88,12 @@ DISPLAY_WRITER = "FUN_CODE_810f"
 #: Safety caps so a background ``run()`` can never spin.
 MAX_ISR_PER_RUN = 32
 MAX_STEPS_PER_RUN = 200_000
+
+#: Машинных циклов на один захват замка в :meth:`RecoveredFirmwareSession.run`.
+#: Между срезами замок отпускается, поэтому чтения Tk-потока (``display.text()``
+#: , ``status()``, нажатия клавиш) ждут не дольше одного среза (~1-2 мс), а не
+#: всего бюджета (десятки и сотни мс - это и была причина «торможения» GUI).
+LOCK_SLICE_CYCLES = 250
 
 
 class RecoveredInterpreter(Interpreter):
@@ -110,6 +136,53 @@ def _resolve(path: str) -> str:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Кэши бута: обе части чистые и дорогие - вместе ~1.5 с каждого boot() новой
+# сессии (замер: make_backend('recovered') ~1.7-2.9 с; parse_body ~1.2 с,
+# diagnose_consumers ~0.35 с).  В GUI процесс живёт один раз и бут делает
+# обычно одну сессию, но тесты и инструменты поднимают сессии десятками.
+# ---------------------------------------------------------------------------
+
+#: отчёт diagnose_consumers: ключ (dump+ROM) -> отчёт (наружу - копия)
+_DIAGNOSE_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+
+def _install_body_parse_cache() -> None:
+    """Кэшировать ``cparse.parse_body`` (тела ``FUN_CODE_xxxx``) на процесс.
+
+    Парсер **чистый** (строка тела -> AST), а интерпретатор AST не мутирует:
+    в ``recover/`` нет ни одной записи в поля ``Stmt``/``Expr`` (проверено
+    поиском), ``_collect`` только читает узлы, а состояние сессии
+    (интерпретатор, globals, машина) живёт вне AST.  Поэтому результат
+    разбора безопасно разделить между сессиями одного процесса.
+
+    Ошибки парсинга кэш не запоминает (``lru_cache`` не кэширует исключения)
+    - поведение ``load()`` на битых телах не меняется.  Идемпотентна:
+    повторный вызов ничего не делает.
+    """
+    from . import cparse
+
+    original = getattr(cparse, "parse_body", None)
+    if original is None or getattr(original, "_body_cache_wrapped", False):
+        return
+    cached = lru_cache(maxsize=1024)(original)
+    cached._body_cache_wrapped = True       # маркер идемпотентности
+    cached.__name__ = "parse_body"
+    cparse.parse_body = cached
+
+
+def _diagnose_cache_key(dump_file: str, rom_path: str) -> Tuple[Any, ...]:
+    """Ключ кэша ``diagnose_consumers``: содержимое dump и ROM (mtime, размер)."""
+    def stamp(path: str) -> Tuple[Any, ...]:
+        try:
+            info = os.stat(path)
+        except OSError:
+            return (path, 0)
+        return (path, info.st_mtime_ns, info.st_size)
+
+    return (stamp(dump_file), stamp(rom_path))
+
+
 class _LockedDisplay:
     """Thread-safe view of the board display (``docs/board_contract.md`` 2)."""
 
@@ -126,8 +199,19 @@ class _LockedDisplay:
         return int(getattr(self._obj, "lines", 1))
 
     def text(self) -> str:
-        with self._session._lock:
-            return str(self._obj.text())
+        # Дорожка без ожидания: если замок занят срезом run(), не блокируемся,
+        # а отдаём снимок прошлого среза.  При свободном замке (GUI между
+        # тиками, однопоточные тесты) - живое чтение под замком.
+        session = self._session
+        lock = session._lock
+        if lock.acquire(blocking=False):
+            try:
+                value = str(self._obj.text())
+                session._snap_display = value
+                return value
+            finally:
+                lock.release()
+        return session._snap_display
 
     def cell_segments(self, index: int) -> int:
         with self._session._lock:
@@ -185,24 +269,42 @@ class _LockedPrinter:
         self._obj = obj
 
     def paper(self) -> List[str]:
-        with self._session._lock:
-            return list(self._obj.paper())
+        # Как и display.text(): не ждём срез run(), берём снимок (см. выше).
+        session = self._session
+        lock = session._lock
+        if lock.acquire(blocking=False):
+            try:
+                lines = list(self._obj.paper())
+                session._snap_paper = tuple(lines)
+                return lines
+            finally:
+                lock.release()
+        return list(session._snap_paper)
 
     def text(self) -> str:
-        with self._session._lock:
-            return "\n".join(self._obj.paper())
+        return "\n".join(self.paper())
 
     def clear(self) -> None:
         with self._session._lock:
             self._obj.clear()
+            self._session._refresh_snapshots_locked()
 
     def feed(self, lines: int = 1) -> None:
         with self._session._lock:
             self._obj.feed(lines)
+            self._session._refresh_snapshots_locked()
 
     def is_busy(self) -> bool:
-        with self._session._lock:
-            return bool(self._obj.is_busy())
+        session = self._session
+        lock = session._lock
+        if lock.acquire(blocking=False):
+            try:
+                busy = bool(self._obj.is_busy())
+                session._snap_busy = busy
+                return busy
+            finally:
+                lock.release()
+        return session._snap_busy
 
     def __repr__(self) -> str:                    # pragma: no cover
         return f"<printer {len(self.paper())} lines>"
@@ -276,6 +378,17 @@ class RecoveredFirmwareSession:
         self._boot_error = ""
         self.alias_report: Dict[str, object] = {}
 
+        # -- срез-снимки: обновляются ТОЛЬКО под self._lock -------------------
+        # Фасады и status() читают их без ожидания, пока идёт срез run():
+        # одно значение на срез => контракт «статус == экран» не рвётся.
+        self._snap_display: str = ""
+        self._snap_paper: Tuple[str, ...] = ()
+        self._snap_busy: bool = False
+        #: последний построенный status()-dict (наружу всегда отдаётся копия)
+        self._status_cache: Optional[Dict[str, Any]] = None
+        #: UI запросил status() под нагрузкой - пересобрать кэш в конце среза
+        self._status_wanted: bool = False
+
         self._hardware = hardware
         self._display_facade: Any = None
         self._keyboard_facade: Any = None
@@ -289,10 +402,34 @@ class RecoveredFirmwareSession:
             self._display_facade = _EmptyDisplay()
             self._keyboard_facade = _EmptyKeyboard()
             self._printer_facade = _EmptyPrinter()
-            return
-        self._display_facade = _LockedDisplay(self, board.display)
-        self._keyboard_facade = _LockedKeyboard(self, board.keyboard)
-        self._printer_facade = _LockedPrinter(self, board.printer)
+        else:
+            self._display_facade = _LockedDisplay(self, board.display)
+            self._keyboard_facade = _LockedKeyboard(self, board.keyboard)
+            self._printer_facade = _LockedPrinter(self, board.printer)
+        # фасады подменены - снимки обязаны соответствовать новым объектам
+        self._refresh_snapshots_locked()
+
+    def _refresh_snapshots_locked(self) -> None:
+        """Обновить снимки экрана/ленты/принтера (вызывать под ``self._lock``).
+
+        Снимки - источник и для ``status()["display"]`` /
+        ``status()["receipt_lines"]``, и для фасадов, когда замок занят срезом
+        ``run()``: обе стороны читают одно и то же значение, поэтому контракт
+        «статус не врёт про экран» выполняется и под нагрузкой.  Ошибки платы
+        не должны ронять ``run()`` - остаётся прошлое значение снимка.
+        """
+        try:
+            self._snap_display = str(self._display_facade.text())
+        except Exception:                          # noqa: BLE001 - снимок живёт дальше
+            pass
+        try:
+            self._snap_paper = tuple(self._printer_facade.paper())
+        except Exception:                          # noqa: BLE001
+            pass
+        try:
+            self._snap_busy = bool(self._printer_facade.is_busy())
+        except Exception:                          # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------ public view
     @property
@@ -326,6 +463,9 @@ class RecoveredFirmwareSession:
                 self._booted = True
             else:
                 self._booted = True
+            # снимки обязаны соответствовать состоянию после boot()
+            # (в т.ч. demo-шаг, сделанный прямо в _boot_locked)
+            self._refresh_snapshots_locked()
 
     def _boot_locked(self) -> None:
         dump_file = _resolve(self.dump_path)
@@ -358,6 +498,9 @@ class RecoveredFirmwareSession:
         # Bind the decompiler's dangling aliases (_7_4 -> RAM 0x27 bit 4, P1_3,
         # DAT_CODE_xxxx, ...) before loading: see recover.hal.bind_recovered_aliases
         self.alias_report = bind_recovered_aliases(machine, program.globals)
+        # бут без окна: разбор тел функций - самая дорогая часть (~1.2 с),
+        # кэшируем на процесс (см. _install_body_parse_cache)
+        _install_body_parse_cache()
         library.load(program)
         stats = library.stats()
         self._functions_loaded = stats["loaded"]
@@ -386,7 +529,18 @@ class RecoveredFirmwareSession:
                 )
 
                 self.runner = RealRunner(hal=self.hal, rom=self.rom)
-                self.consumer_report = diagnose_consumers(program, self.rom)
+                # diagnose_consumers чистая, но дорогая (~0.35 с): кэшируем
+                # по содержимому dump+ROM, наружу всегда копия (в отчёт
+                # дописываются periods - чужой словарь не трогаем)
+                rom_file = _resolve(self.rom_path)
+                if not os.path.isfile(rom_file):
+                    rom_file = _resolve(DEFAULT_ROM)
+                key = _diagnose_cache_key(dump_file, rom_file)
+                cached_report = _DIAGNOSE_CACHE.get(key)
+                if cached_report is None:
+                    cached_report = diagnose_consumers(program, self.rom)
+                    _DIAGNOSE_CACHE[key] = cached_report
+                self.consumer_report = copy.deepcopy(cached_report)
                 # documented reload values of the two ISR bodies (record cites)
                 self.consumer_report["periods"] = {
                     "timer1": PERIOD_TIMER1,
@@ -481,6 +635,14 @@ class RecoveredFirmwareSession:
         """Advance the recovered program / hardware by ``cycles`` machine cycles.
 
         Called from a background thread.  Bounded work per call; never raises.
+
+        Путь реального hex (``runner is not None``) исполняется **срезами** по
+        :data:`LOCK_SLICE_CYCLES` машинных циклов: между срезами замок
+        отпускается, поэтому ``display.text()``/``status()``/нажатия из
+        Tk-потока ждут не дольше одного среза (~1-2 мс).  Снимки экрана и
+        ленты обновляются в конце каждого среза.  Демо-путь и fallback без
+        ROM остаются одним захватом - там работа на вызов ограничена одним
+        шагом последовательности / :data:`MAX_ISR_PER_RUN` вызовами ISR.
         """
         with self._lock:
             if not self._booted:
@@ -493,15 +655,55 @@ class RecoveredFirmwareSession:
                 budget = 0
             if budget <= 0:
                 return
-            try:
-                if self._source == "demo":
-                    self._run_demo_locked(budget)
-                else:
-                    self._run_recovered_locked(budget)
-            except Exception as exc:                       # noqa: BLE001 - by contract
-                self._halted = True
-                self._running = False
-                self._reason = f"run failed: {type(exc).__name__}: {exc}"
+            sliced = self.runner is not None and self._source != "demo"
+            if not sliced:
+                self._run_slice_locked(budget)
+                return
+
+        # Срезы: замок держится не дольше одного среза и отпускается между
+        # ними - читатели из Tk-потока ждут максимум один срез.
+        while budget > 0:
+            with self._lock:
+                if not self._booted or self.machine is None:
+                    return
+                chunk = min(budget, LOCK_SLICE_CYCLES)
+                if not self._run_slice_locked(chunk):
+                    return                      # срез упал: как и раньше,
+                                                # бюджет дальше не крутим
+                budget -= chunk
+                runner = self.runner
+                if runner is None or runner.halted:
+                    # дальше остались бы только пустые вызовы advance():
+                    # исполнение честно остановлено, повторять нечего
+                    return
+
+    def _run_slice_locked(self, cycles: int) -> bool:
+        """Один срез исполнения под замком.  Никогда не бросает исключений.
+
+        Возвращает ``False``, если срез упал (тогда ``run()`` прекращает
+        бюджет - как и раньше, когда исключение прерывало весь вызов).
+        """
+        try:
+            if self._source == "demo":
+                self._run_demo_locked(cycles)
+            else:
+                self._run_recovered_locked(cycles)
+        except Exception as exc:                       # noqa: BLE001 - by contract
+            self._halted = True
+            self._running = False
+            self._reason = f"run failed: {type(exc).__name__}: {exc}"
+            self._refresh_snapshots_locked()
+            return False
+        finally:
+            # снимки и (по запросу UI) кэш status() - строго под замком
+            self._refresh_snapshots_locked()
+            if self._status_wanted:
+                self._status_wanted = False
+                try:
+                    self._status_cache = self._build_status_locked()
+                except Exception:                      # noqa: BLE001
+                    pass
+        return True
 
     # ---------------------------------------------------------------- recovered
     def _run_recovered_locked(self, cycles: int) -> None:
@@ -650,39 +852,71 @@ class RecoveredFirmwareSession:
 
     # ----------------------------------------------------------------- status
     def status(self) -> Dict[str, Any]:
-        """Truthful snapshot; safe to call from any thread."""
-        with self._lock:
-            machine = self.machine
-            missing = 0
-            if machine is not None:
-                missing = sum(machine.missing_calls.values())
-            return {
-                "running": bool(self._running),
-                "halted": bool(self._halted),
-                "reason": str(self._reason),
-                "steps": int(self._steps),
-                "missing_calls": int(missing),
-                "source": self._source,
-                "entry": f"0x{self._entry:04X}",
-                "entry_covered": bool(self._entry_covered),
-                "isr": REFRESH_ISR if self._isr_active else "",
-                "boot_error": self._boot_error,
-                "functions_loaded": int(self._functions_loaded),
-                "functions_failed": int(self._functions_failed),
-                "globals": int(self._globals),
-                "aliases": dict(self.alias_report),
-                "demo_steps_done": int(self._demo_index),
-                "display": self._display_facade.text(),
-                "receipt_lines": len(self._printer_facade.paper()),
-                # what is actually executing (real hex vs pseudo-code vs demo)
-                "real_hex": self.runner is not None,
-                "isr_calls": int(self.runner.timer1_calls) if self.runner else 0,
-                "mux_calls": int(self.runner.timer0_calls) if self.runner else 0,
-                "cpu_instructions": int(self.runner.instructions) if self.runner else 0,
-                "consumer": str(
-                    self.consumer_report.get("display_buffer", {}).get("verdict", "")
-                ),
-            }
+        """Truthful snapshot; safe to call from any thread.
+
+        Не блокируется, пока идёт срез ``run()``: если замок занят, отдаёт
+        кэш, собранный в конце прошлого среза (и просит пересобрать его на
+        ближайшем срезе - флаг ``_status_wanted``).  Кэш и фасады читают
+        **одни и те же снимки**, поэтому
+        ``status()["display"] == display.text()`` и
+        ``status()["receipt_lines"] == len(printer.paper())`` выполняются и
+        под нагрузкой.  При свободном замке (однопоточные тесты, эмуляция не
+        идёт) читается живое состояние - как раньше.
+        """
+        lock = self._lock
+        if lock.acquire(blocking=False):
+            try:
+                built = self._build_status_locked()
+                self._status_cache = built
+                return dict(built)
+            finally:
+                lock.release()
+        cached = self._status_cache
+        if cached is None:
+            # кэша ещё нет (первый вызов под нагрузкой) - дождаться среза
+            with self._lock:
+                built = self._build_status_locked()
+                self._status_cache = built
+                return dict(built)
+        self._status_wanted = True
+        return dict(cached)
+
+    def _build_status_locked(self) -> Dict[str, Any]:
+        """Построить status()-dict.  Вызывать строго под ``self._lock``."""
+        # снимки обновляются здесь же, чтобы поля display/receipt_lines и
+        # фасады читали одно и то же значение
+        self._refresh_snapshots_locked()
+        machine = self.machine
+        missing = 0
+        if machine is not None:
+            missing = sum(machine.missing_calls.values())
+        return {
+            "running": bool(self._running),
+            "halted": bool(self._halted),
+            "reason": str(self._reason),
+            "steps": int(self._steps),
+            "missing_calls": int(missing),
+            "source": self._source,
+            "entry": f"0x{self._entry:04X}",
+            "entry_covered": bool(self._entry_covered),
+            "isr": REFRESH_ISR if self._isr_active else "",
+            "boot_error": self._boot_error,
+            "functions_loaded": int(self._functions_loaded),
+            "functions_failed": int(self._functions_failed),
+            "globals": int(self._globals),
+            "aliases": dict(self.alias_report),
+            "demo_steps_done": int(self._demo_index),
+            "display": self._snap_display,
+            "receipt_lines": len(self._snap_paper),
+            # what is actually executing (real hex vs pseudo-code vs demo)
+            "real_hex": self.runner is not None,
+            "isr_calls": int(self.runner.timer1_calls) if self.runner else 0,
+            "mux_calls": int(self.runner.timer0_calls) if self.runner else 0,
+            "cpu_instructions": int(self.runner.instructions) if self.runner else 0,
+            "consumer": str(
+                self.consumer_report.get("display_buffer", {}).get("verdict", "")
+            ),
+        }
 
     # ------------------------------------------------------------------ reset
     def reset(self) -> None:
@@ -732,6 +966,7 @@ class RecoveredFirmwareSession:
             try:
                 result = fn.invoke(self.library.interpreter, list(args))
                 self._steps += 1
+                self._refresh_snapshots_locked()
                 return {
                     "ok": True,
                     "error": "",
@@ -739,10 +974,12 @@ class RecoveredFirmwareSession:
                     "missing_calls": sum(self.machine.missing_calls.values()),
                 }
             except MissingFirmware as exc:
+                self._refresh_snapshots_locked()
                 return {"ok": False, "error": str(exc), "missing": True,
                         "result": None,
                         "missing_calls": sum(self.machine.missing_calls.values())}
             except Exception as exc:                       # noqa: BLE001
+                self._refresh_snapshots_locked()
                 return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
                         "result": None,
                         "missing_calls": sum(self.machine.missing_calls.values())}

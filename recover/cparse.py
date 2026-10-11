@@ -37,7 +37,7 @@ TOKEN_RE = re.compile(
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class Token:
     kind: str
     text: str
@@ -364,15 +364,33 @@ class Parser:
         ("+", "-"), ("*", "/", "%"),
     ]
 
+    #: ``op -> its level`` для precedence climbing (строится один раз;
+    #: операторы между уровнями не повторяются, проверяется по LEVELS).
+    _OP_LEVEL = {
+        op: i for i, ops in enumerate(LEVELS) for op in ops
+    }
+
     def parse_binary(self, level: int) -> Expr:
+        """Precedence climbing.
+
+        Было: рекурсия по каждому уровню (``parse_binary(level+1)`` спускался
+        до дна даже для атома) — ~11 вложенных вызовов и 11 проверок на каждый
+        узел выражения (cProfile бута: 601K вызовов parse_binary).  Стало: один
+        цикл, вниз рекурсия только по реально присутствующим операторам;
+        таблица приоритетов и левая ассоциативность (правая часть зовётся с
+        ``op_level + 1``) — ровно те же, что в ``LEVELS``.
+        """
         if level >= len(self.LEVELS):
             return self.parse_unary()
-        left = self.parse_binary(level + 1)
-        while self.tok.text in self.LEVELS[level]:
+        op_level = self._OP_LEVEL
+        left = self.parse_unary()
+        while True:
+            lvl = op_level.get(self.tok.text)
+            if lvl is None or lvl < level:
+                return left
             op = self.advance().text
-            right = self.parse_binary(level + 1)
+            right = self.parse_binary(lvl + 1)
             left = Expr("bin", left, right, c=op, pos=left.pos)
-        return left
 
     def parse_unary(self) -> Expr:
         token = self.tok

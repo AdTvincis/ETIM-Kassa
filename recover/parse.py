@@ -95,6 +95,17 @@ class Function:
             self._baddata = baddata_info(self.body)
         return self._baddata
 
+    def preload_baddata(self, ast) -> None:
+        """Classify on an AST the caller has *already* parsed.
+
+        ``FunctionLibrary.load`` parses every body for execution anyway;
+        without this hook the first ``is_stub``/``baddata_prefix`` read
+        re-parsed the same text a second time (measured: ~2.3 s of the
+        recovered backend's boot — see tools/_bench.py boot profiling).
+        """
+        if self._baddata is None:
+            self._baddata = baddata_info(self.body, ast)
+
     @property
     def has_baddata(self) -> bool:
         """True when the decompiler halted on undecodable bytes in this body."""
@@ -129,7 +140,7 @@ class Function:
         return (not self.has_baddata) and self.address is not None and self.address >= 0x8000
 
 
-def baddata_info(body: str) -> Tuple[bool, int]:
+def baddata_info(body: str, ast=None) -> Tuple[bool, int]:
     """Classify one body: ``(marker present, executable statements before it)``.
 
     The marker is found textually (``halt_baddata()`` is unambiguous), but the
@@ -137,15 +148,19 @@ def baddata_info(body: str) -> Tuple[bool, int]:
     declaration (``char cVar1;``) from a statement, and it cannot see a
     ``return`` nested inside an ``if`` (``FUN_CODE_e8f8`` has exactly that and
     is a partial, not a stub).
+
+    ``ast`` lets a caller that parsed this very body already (the loader does)
+    hand the tree over instead of paying for a second parse of the same text.
     """
     if "halt_baddata()" not in body:
         return False, 0
-    try:
-        from .cparse import parse_body
+    if ast is None:
+        try:
+            from .cparse import parse_body
 
-        ast = parse_body(body)
-    except Exception:                            # noqa: BLE001 - conservative
-        return True, -1
+            ast = parse_body(body)
+        except Exception:                        # noqa: BLE001 - conservative
+            return True, -1
     work = _work_before(ast)
     return True, work
 
@@ -240,12 +255,22 @@ def _strip_comments_preserving_lines(text: str) -> str:
     return "\n".join(out_lines)
 
 
+#: следующая «специальная» скобка/кавычка — прыжок на C-скорости вместо
+#: покадрового обхода тела функции (тела весят килобайты; бут: 600K итераций)
+_SPECIAL_RE = re.compile(r"[{}\"']")
+
+
 def _find_matching_brace(text: str, open_index: int) -> int:
     """Index of the ``}`` matching the ``{`` at ``open_index``."""
     depth = 0
     i = open_index
     n = len(text)
-    while i < n:
+    search = _SPECIAL_RE.search
+    while True:
+        m = search(text, i)
+        if m is None:
+            break
+        i = m.start()
         ch = text[i]
         if ch == '"':
             i += 1
@@ -257,7 +282,7 @@ def _find_matching_brace(text: str, open_index: int) -> int:
                 i += 2 if text[i] == "\\" else 1
         elif ch == "{":
             depth += 1
-        elif ch == "}":
+        else:                                     # "}"
             depth -= 1
             if depth == 0:
                 return i
@@ -314,6 +339,12 @@ def parse_dump(text: str, source_name: str = "") -> Program:
     program = Program(source_name=source_name)
     code = _strip_comments_preserving_lines(text)
     lines = code.splitlines()
+    # Символьные смещения начала каждой строки: O(n) один раз.  Раньше каждая
+    # функция считала своё смещение как sum(len(x)+1 for x in lines[:k]) —
+    # квадратично: 850K итераций генexpr на дампе (замерено cProfile бута).
+    _line_off = [0] * (len(lines) + 1)
+    for _k, _ln in enumerate(lines):
+        _line_off[_k + 1] = _line_off[_k] + len(_ln) + 1
 
     # ---- pass 1: global declarations up to the first function signature
     i = 0
@@ -383,7 +414,7 @@ def parse_dump(text: str, source_name: str = "") -> Program:
             i += 1
             continue
 
-        stripped_offset = sum(len(x) + 1 for x in lines[:brace_line])
+        stripped_offset = _line_off[brace_line]
         brace_index = code.index("{", stripped_offset)
         close_index = _find_matching_brace(code, brace_index)
         body = code[brace_index + 1 : close_index]

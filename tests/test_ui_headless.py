@@ -32,6 +32,9 @@ def _tk_available():
         return False, "tkinter недоступен: %r" % (exc,)
     try:
         root = tk.Tk()
+        # Ни одного ВИДИМОГО окна (заказ пользователя): проверка создания
+        # работает и у withdraw-корня.
+        root.withdraw()
     except Exception as exc:
         return False, "нет дисплея/Tk: %r" % (exc,)
     try:
@@ -183,6 +186,9 @@ class TestUiModuleShape(unittest.TestCase):
 
         # Импорт уже выполнен на уровне модуля: окон быть не должно.
         root = tk.Tk()
+        # Полностью за экраном (заказ пользователя: никаких видимых окон),
+        # но mapped — тесты ниже проверяют winfo_ismapped().
+        root.geometry("+-30000+-30000")
         try:
             before = len(root.winfo_children())
             import importlib
@@ -396,6 +402,67 @@ class TestAppWithMockBoard(unittest.TestCase):
         self.app.screen.update_from_display(broken)
         self.assertIsNotNone(self.app.screen._matrix())
         self.app.refresh()  # не должен бросить
+
+    def test_refresh_skips_screen_work_when_text_unchanged(self):
+        """Новое гарантия скорости: пока текст индикатора не изменился,
+        ``refresh()`` не идёт в тяжёлый путь ``update_from_display``
+        (``render_rows`` + пересборка матрицы) — рисуем только при
+        реальном изменении содержимого.  Раньше каждый тик (50 мс) строил
+        матрицу заново, даже когда экран стоял без изменений."""
+        calls = {"n": 0}
+        real_render = self.board.display.render_rows
+
+        def counting_render(scale=1):
+            calls["n"] += 1
+            return real_render(scale)
+
+        self.board.display.render_rows = counting_render
+        self.board.display.set_text("ИТОГ        1234.56")
+        self.app.refresh()                      # изменилось -> полный путь
+        first = calls["n"]
+        self.assertGreater(first, 0, "первый refresh обязан отрисовать экран")
+        for _ in range(3):
+            self.app.refresh()                  # без изменений -> без отрисовки
+        self.assertEqual(
+            calls["n"], first,
+            "refresh перерисовывает неизменённый индикатор (render_rows x%d)" % calls["n"],
+        )
+        self.board.display.set_text("ИТОГ        1234.57")
+        self.app.refresh()                      # новое содержимое -> снова полный путь
+        self.assertGreater(calls["n"], first, "изменение текста не дошло до экрана")
+
+    def test_refresh_reports_changed_text_after_an_error(self):
+        """Ошибка платы не «залипает»: после неё следующий refresh с живым
+        содержимым обязан снова проходить полным путём, убрать «ОШИБКА» и
+        показать живой экран (кэш текста сбрасывается при ошибке)."""
+        state = {"fail": True}
+        display = self.board.display
+        real_text = display.text
+        real_render = display.render_rows
+
+        def flaky_text():
+            if state["fail"]:
+                raise RuntimeError("display сломался")
+            return real_text()
+
+        def flaky_render(scale=1):
+            if state["fail"]:
+                raise RuntimeError("display сломался")
+            return real_render(scale)
+
+        display.text = flaky_text
+        display.render_rows = flaky_render
+        # оба пути чтения упали -> fatal -> «ОШИБКА ЭКРАНА» в статусе
+        self.app.refresh()
+        self.assertTrue(self.app.error_text)
+        self.assertIn("ОШИБКА", self.app.status_var.get())
+        state["fail"] = False                   # плата ожила с новым текстом
+        display.set_text("ВОССТАНОВЛЕН")
+        self.app.refresh()
+        self.assertIsNone(self.app.error_text,
+                         "ошибка должна уйти после восстановления платы")
+        matrix = "".join(self.app.screen._matrix())
+        self.assertIn("#", matrix, "живой экран не показался после ошибки")
 
     # -- 5. чек ------------------------------------------------------------
 
@@ -618,7 +685,11 @@ class _TkFixture(unittest.TestCase):
 
         self.tk = tk
         self.root = tk.Tk()
-        self.root.geometry(self.GEOMETRY)
+        # Размер из GEOMETRY, но позиция — полностью за экраном: пользователю
+        # нельзя показывать окна (заказ), при этом корень остаётся mapped,
+        # чтобы winfo_ismapped() и геометрические проверки работали как раньше.
+        size = self.GEOMETRY.split("+", 1)[0]
+        self.root.geometry(size + "+-30000+-30000")
         self.root.update_idletasks()
         self.root.update()
 

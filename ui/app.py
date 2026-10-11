@@ -56,6 +56,9 @@ class CashRegisterApp:
         self._last_status = None
         self._last_key = None
         self._counter = 0
+        #: последний показанный текст индикатора: при неизменённом тексте
+        #: refresh() пропускает тяжёлый путь (render_rows + пересборка матрицы)
+        self._last_display_text = None
         #: True, если пользователь сам выбрал индикатор в списке режимов.
         self._manual_mode = False
 
@@ -395,6 +398,22 @@ class CashRegisterApp:
     # Периодическое обновление
     # ------------------------------------------------------------------
 
+    def stop_auto_refresh(self) -> None:
+        """Выключить внутренний таймер обновления окна.
+
+        Хост (``main.py::run_gui``) держит собственный таймер и сам зовёт
+        :meth:`refresh`; без этой операции обновление выполнялось бы **дважды**
+        за интервал (двойная работа Tk и лишние опросы платы).  Прямые вызовы
+        ``refresh()`` (F5, тесты) работают всегда, независимо от таймера.
+        """
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        self._refresh_ms = None
+
     def _schedule(self) -> None:
         if self._closed or self._refresh_ms is None or self._refresh_ms <= 0:
             return
@@ -418,6 +437,11 @@ class CashRegisterApp:
         Хост (``main.py``) вызывает метод каждые ~50 мс. Если плата ещё не
         прошла ``boot()`` (пустая/нулевая) или её методы бросают исключения,
         показываем текст ошибки на экране и в строке состояния, не падая.
+
+        Экономия: текст индикатора читается один раз дешёвой дорожкой
+        (см. :meth:`_peek_display_text`) и пока он не изменился, тяжёлый путь
+        ``screen.update_from_display`` (``render_rows`` + пересборка матрицы)
+        пропускается — рисуем только при реальном изменении содержимого.
         """
         if self._closed:
             return
@@ -428,9 +452,18 @@ class CashRegisterApp:
         except Exception:
             pass
 
+        # Дешёвая дорожка: пока текст индикатора не изменился, тяжёлый путь
+        # (render_rows + пересборка матрицы) не запускаем - рисуем только при
+        # реальном изменении содержимого.  text is None (нет объекта/ошибка
+        # платы) всегда идёт полным путём, чтобы ошибки не «залипали».
+        text = self._peek_display_text()
+        unchanged = text is not None and text == self._last_display_text
         fatal = None
         try:
-            ok, last_error = self.screen.update_from_display(self.display)
+            ok, last_error = (
+                (True, None) if unchanged
+                else self.screen.update_from_display(self.display)
+            )
             if not ok and last_error is not None:
                 fatal = last_error
                 try:
@@ -443,6 +476,12 @@ class CashRegisterApp:
                 self.screen.set_text("\u041e\u0428\u0418\u0411\u041a\u0410 \u042d\u041a\u0420\u0410\u041d\u0410")
             except Exception:
                 pass
+        # содержимое показано - кэшируем его текст; при ошибке платы кэш
+        # сбрасываем, чтобы следующий refresh снова прошёл полным путём
+        # и заменил «ОШИБКА ЭКРАНА» живым экраном
+        self._last_display_text = (
+            self._peek_display_text() if fatal is None else None
+        )
         try:
             self.receipt.update_from_printer(self.printer)
         except Exception as exc:
@@ -464,6 +503,26 @@ class CashRegisterApp:
             self.clock_var.set("цикл %d" % self._counter)
         except Exception:
             pass
+
+    def _peek_display_text(self):
+        """Дешёвое чтение текста индикатора (``None`` - нет объекта/ошибка).
+
+        У фасада сессии (``recover.session``) ``text()`` не ждёт замок
+        эмуляции: при идущем срезе он возвращает снимок прошлого среза за
+        микросекунды, поэтому опрос каждого тика почти бесплатен.  Сравнение
+        с ``_last_display_text`` позволяет пропускать перерисовку экрана,
+        пока содержимое не изменилось (см. :meth:`refresh`).
+        """
+        display = self.display
+        if display is None:
+            return None
+        getter = getattr(display, "text", None)
+        if not callable(getter):
+            return None
+        try:
+            return str(getter())
+        except Exception:
+            return None
 
     def _read_board_status(self):
         """Необязательный статус платы: ``status()`` (dict или строка).

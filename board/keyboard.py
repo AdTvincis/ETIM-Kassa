@@ -85,6 +85,15 @@ class Keyboard:
         self._pressed: Dict[str, bool] = {name: False for name in self.keys}
         self._loose: Dict[str, bool] = {}
         self._tap_until: Dict[str, int] = {}
+        # Имена клеток наперёд (с допаддингом пустыми строками до 8 колонок):
+        # read_columns зовётся прошивкой на каждое сканирование матрицы, и
+        # раньше каждый вызов платил 8 методов key_at() + IndexError-веток
+        # (бенч: 6.1 us/call; см. tools/_bench.py).
+        self._row_names: Tuple[Tuple[str, ...], ...] = tuple(
+            tuple((row[c] if c < len(row) else "")
+                  for c in range(self.cols))
+            for row in self.layout
+        )
         self.press_count = 0
         self.release_count = 0
         self.event_count = 0            # the board turns this into INT0
@@ -180,10 +189,12 @@ class Keyboard:
         if row < 0 or row >= self.rows:
             return 0xFF
         cols = 0
+        names = self._row_names[row]
         with self._lock:
-            for c in range(self.cols):
-                name = self.key_at(row, c)
-                if name and (self._pressed.get(name) or self._loose.get(name, False)):
+            pressed = self._pressed
+            loose = self._loose
+            for c, name in enumerate(names):
+                if name and (pressed.get(name) or loose.get(name, False)):
                     cols |= 1 << c
         return (~cols) & 0xFF
 
@@ -210,6 +221,10 @@ class Keyboard:
     # ------------------------------------------------------------------ time
     def tick(self, cycles: int) -> None:
         """Expire momentary taps so a mouse click behaves like a real press."""
+        # Горячий путь: пока тапов нет (обычное состояние), замок не берём —
+        # tick зовётся почти на каждой инструкции (tools/_bench.py).
+        if not self._tap_until:
+            return
         with self._lock:
             if not self._tap_until:
                 return

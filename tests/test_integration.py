@@ -678,6 +678,67 @@ class TestRecoveredBackendSmoke(unittest.TestCase):
         self.assertTrue(backend.display.text().strip(),
                         "восстановленный бэкенд оставил экран пустым")
 
+    def test_ui_reads_never_wait_for_the_whole_budget(self):
+        """Новое гарантия скорости: срезы ``session.run()`` под нагрузкой.
+
+        Пока фон крутит ``run_budget(100_000)``, чтения из «Tk-потока»
+        (``display.text()``/``status()``) обязаны ждать максимум один срез
+        (``recover.session.LOCK_SLICE_CYCLES`` ~250 циклов), а не весь
+        бюджет.  До фикса один такой бюджет удерживал замок ~0.8-1.6 с -
+        это и есть «подвисание» окна.  Порог 60 мс >> измеряемых ~0.1 мс,
+        но << времени удержания замка старым кодом.
+        """
+        import threading
+        import time
+
+        def p95(xs):
+            xs = sorted(xs)
+            return xs[min(len(xs) - 1, int(len(xs) * 0.95))]
+
+        backend = m.make_backend("recovered", _args())
+        stop = threading.Event()
+        writer_errors = []
+
+        def writer():
+            try:
+                while not stop.is_set():
+                    backend.run_budget(100_000)
+            except Exception as exc:  # noqa: BLE001
+                writer_errors.append(repr(exc))
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        lat_text, lat_status = [], []
+        try:
+            for _ in range(40):
+                t0 = time.perf_counter()
+                backend.display.text()
+                lat_text.append(time.perf_counter() - t0)
+                t0 = time.perf_counter()
+                backend.status()
+                lat_status.append(time.perf_counter() - t0)
+                time.sleep(0.005)
+        finally:
+            stop.set()
+            thread.join(timeout=10.0)
+        self.assertEqual(writer_errors, [],
+                         "фоновый run_budget упал: %r" % writer_errors)
+        self.assertLess(
+            p95(lat_text), 0.060,
+            "display.text() ждёт весь бюджет сессии: p95=%.1f мс"
+            % (p95(lat_text) * 1000))
+        self.assertLess(
+            p95(lat_status), 0.060,
+            "status() ждёт весь бюджет сессии: p95=%.1f мс"
+            % (p95(lat_status) * 1000))
+        # после остановки фона контракт статуса остаётся точным
+        status = backend.status()
+        self.assertEqual(status["display"], backend.display.text(),
+                         "status()['display'] != display.text() после нагрузки")
+        self.assertEqual(status["receipt_lines"],
+                         len(backend.printer.paper()),
+                         "status()['receipt_lines'] != len(printer.paper())")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)
