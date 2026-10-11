@@ -85,6 +85,12 @@ class Keyboard:
         self._pressed: Dict[str, bool] = {name: False for name in self.keys}
         self._loose: Dict[str, bool] = {}
         self._tap_until: Dict[str, int] = {}
+        # Кэш байтов колонок по строкам: шина читает page 0x91 десятки тысяч
+        # раз за прогон (бенч: 24K чтений x 3.9us), а состояние меняется
+        # только при нажатии/отпускании.  Обмен списка — атомарная замена
+        # ссылки: читатель-поток получает либо старый список (одно устаревшее
+        # значение, как у реального сканера), либо новый с None.
+        self._col_cache: List[object] = [None] * self.rows
         # Имена клеток наперёд (с допаддингом пустыми строками до 8 колонок):
         # read_columns зовётся прошивкой на каждое сканирование матрицы, и
         # раньше каждый вызов платил 8 методов key_at() + IndexError-веток
@@ -133,6 +139,7 @@ class Keyboard:
             if not was:
                 self.press_count += 1
                 self.event_count += 1
+        self._invalidate_columns()
 
     def release(self, name: str) -> None:
         name = self._canonical(name)
@@ -146,6 +153,7 @@ class Keyboard:
             if was:
                 self.release_count += 1
                 self.event_count += 1
+        self._invalidate_columns()
 
     def tap(self, name: str) -> None:
         """Momentary press used by mouse clicks.
@@ -181,22 +189,36 @@ class Keyboard:
         with self._lock:
             return any(self._pressed.values()) or any(self._loose.values())
 
+    def _invalidate_columns(self) -> None:
+        """Сбросить кэш колонок (вызывать при любом изменении нажатий)."""
+        self._col_cache = [None] * self.rows
+
     def read_columns(self, row: int) -> int:
         """Column byte for ``row``: bit = 1 idle (pull-up), 0 = contact closed.
 
         Unpopulated positions are not connected to anything, so they stay high.
+
+        Горячий путь: результат кэшируется до следующего изменения нажатий
+        (см. :meth:`_invalidate_columns`).  Без замка: здесь только статический
+        кортеж имён и ``dict.get`` — атомарные под GIL; прежний ``with`` стоил
+        RLock-вход на каждое чтение страницы клавиатуры.
         """
         if row < 0 or row >= self.rows:
             return 0xFF
+        cache = self._col_cache
+        hit = cache[row]
+        if hit is not None:
+            return hit          # type: ignore[return-value]
         cols = 0
         names = self._row_names[row]
-        with self._lock:
-            pressed = self._pressed
-            loose = self._loose
-            for c, name in enumerate(names):
-                if name and (pressed.get(name) or loose.get(name, False)):
-                    cols |= 1 << c
-        return (~cols) & 0xFF
+        pressed = self._pressed
+        loose = self._loose
+        for c, name in enumerate(names):
+            if name and (pressed.get(name) or loose.get(name, False)):
+                cols |= 1 << c
+        value = (~cols) & 0xFF
+        cache[row] = value
+        return value
 
     def row_bits(self) -> int:
         """Bitmap of rows that currently have at least one key down."""
@@ -232,6 +254,7 @@ class Keyboard:
                 left = self._tap_until[name] - cycles
                 if left <= 0:
                     del self._tap_until[name]
+                    self._invalidate_columns()
                     if name in self._pressed:
                         self._pressed[name] = False
                     else:
@@ -246,6 +269,7 @@ class Keyboard:
             for n in self._loose:
                 self._loose[n] = False
             self._tap_until.clear()
+        self._invalidate_columns()
 
     def describe(self) -> str:
         down = self.pressed_keys()

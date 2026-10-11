@@ -397,80 +397,85 @@ class Display:
 
     # ----------------------------------------------------------- write paths
     def write_digit_byte(self, index: int, value: int) -> None:
-        """``0xA1<index> = value`` - the primitive behind ``FUN_CODE_810f``.
+        with self._lock:
+            """``0xA1<index> = value`` - the primitive behind ``FUN_CODE_810f``.
 
-        ``FUN_CODE_810f(param_1, param_2)`` is decompiled as
-        ``*(undefined1 *)CONCAT11(0xa1,param_2) = param_1;`` so the low address
-        byte selects the digit and the data byte is the payload.  The payload
-        is normally a segment byte, *except* that the firmware also writes the
-        Gray-coded selector table ``AIHLDFBC`` (ROM 0x8266: 0x41 0x49 0x48 0x4C
-        0x44 0x46 0x42 0x43) here, so a Gray selector with bit 4/5/6 set is
-        treated as an annunciator/select write instead of as segments.  The
-        heuristic is switchable through ``DISPLAY_A1_GRAY_IS_LAMP``.
-        """
-        self.writes += 1
-        value &= 0xFF
-        self.lamp_byte = value
-        idx = gray_index(value)
-        if DISPLAY_A1_GRAY_IS_LAMP and idx is not None and (value & 0x70) in (0x10, 0x20, 0x40):
-            self.lamp_index = idx
-            for i, bit in enumerate((0x10, 0x20, 0x40)):
-                if value & bit:
-                    self.lamp_bank = i
-                    self.lamps[i] = idx + 1
-            return
-        if 0 <= int(index) < self.digits:
+            ``FUN_CODE_810f(param_1, param_2)`` is decompiled as
+            ``*(undefined1 *)CONCAT11(0xa1,param_2) = param_1;`` so the low address
+            byte selects the digit and the data byte is the payload.  The payload
+            is normally a segment byte, *except* that the firmware also writes the
+            Gray-coded selector table ``AIHLDFBC`` (ROM 0x8266: 0x41 0x49 0x48 0x4C
+            0x44 0x46 0x42 0x43) here, so a Gray selector with bit 4/5/6 set is
+            treated as an annunciator/select write instead of as segments.  The
+            heuristic is switchable through ``DISPLAY_A1_GRAY_IS_LAMP``.
+            """
+            self.writes += 1
+            value &= 0xFF
+            self.lamp_byte = value
+            idx = gray_index(value)
+            if DISPLAY_A1_GRAY_IS_LAMP and idx is not None and (value & 0x70) in (0x10, 0x20, 0x40):
+                self.lamp_index = idx
+                for i, bit in enumerate((0x10, 0x20, 0x40)):
+                    if value & bit:
+                        self.lamp_bank = i
+                        self.lamps[i] = idx + 1
+                return
+            if 0 <= int(index) < self.digits:
+                cell = self._slot(index)
+                if cell is not None:
+                    self._apply(cell, value, 0)
+                self.grid = int(index)
+                self.blank = False
+
+    def write_segment_byte(self, index: int, value: int, high: bool = False) -> None:
+        with self._lock:
+            """Anode/segment byte write (pages 0x82 / 0x92 in the RE map).
+
+            The value is only *latched*; the firmware writes both segment bytes and
+            then the grid select, so the cell is committed by :meth:`select_grid`
+            (ROM order: 0x92, 0x82, then 0xA2 - see 0x8309..0x831E).
+            """
+            self.writes += 1
+            if high:
+                self.seg1 = value & 0xFF
+            else:
+                self.seg0 = value & 0xFF
+            self.blank = False
+
+    def latch_segments(self, low: Optional[int] = None, high: Optional[int] = None) -> None:
+        with self._lock:
+            """Latch the shared segment byte(s) without touching any digit."""
+            self.writes += 1
+            if low is not None:
+                self.seg0 = low & 0xFF
+            if high is not None:
+                self.seg1 = high & 0xFF
+
+    def commit_grid(self, index: Optional[int] = None) -> None:
+        with self._lock:
+            """Show the latched segments on ``index`` (default: current grid)."""
+            if index is None:
+                index = self.grid
+            if index is None or not (0 <= int(index) < self.digits):
+                return
             cell = self._slot(index)
             if cell is not None:
-                self._apply(cell, value, 0)
+                self._apply(cell, self.seg0, self.seg1)
             self.grid = int(index)
             self.blank = False
 
-    def write_segment_byte(self, index: int, value: int, high: bool = False) -> None:
-        """Anode/segment byte write (pages 0x82 / 0x92 in the RE map).
-
-        The value is only *latched*; the firmware writes both segment bytes and
-        then the grid select, so the cell is committed by :meth:`select_grid`
-        (ROM order: 0x92, 0x82, then 0xA2 - see 0x8309..0x831E).
-        """
-        self.writes += 1
-        if high:
-            self.seg1 = value & 0xFF
-        else:
-            self.seg0 = value & 0xFF
-        self.blank = False
-
-    def latch_segments(self, low: Optional[int] = None, high: Optional[int] = None) -> None:
-        """Latch the shared segment byte(s) without touching any digit."""
-        self.writes += 1
-        if low is not None:
-            self.seg0 = low & 0xFF
-        if high is not None:
-            self.seg1 = high & 0xFF
-
-    def commit_grid(self, index: Optional[int] = None) -> None:
-        """Show the latched segments on ``index`` (default: current grid)."""
-        if index is None:
-            index = self.grid
-        if index is None or not (0 <= int(index) < self.digits):
-            return
-        cell = self._slot(index)
-        if cell is not None:
-            self._apply(cell, self.seg0, self.seg1)
-        self.grid = int(index)
-        self.blank = False
-
     def write_char(self, index: int, code: int) -> None:
-        """A character code arrives for ``index`` (PPI port A, "chars" mode)."""
-        self.writes += 1
-        ch = self._decode_code(code)
-        masks = segments_for(ch)
-        self.seg0 = masks & 0xFF
-        self.seg1 = (masks >> 8) & 0xFF
-        cell = self._slot(index)
-        if cell is not None:
-            self._apply(cell, self.seg0, self.seg1, ch=ch)
-        self.blank = False
+        with self._lock:
+            """A character code arrives for ``index`` (PPI port A, "chars" mode)."""
+            self.writes += 1
+            ch = self._decode_code(code)
+            masks = segments_for(ch)
+            self.seg0 = masks & 0xFF
+            self.seg1 = (masks >> 8) & 0xFF
+            cell = self._slot(index)
+            if cell is not None:
+                self._apply(cell, self.seg0, self.seg1, ch=ch)
+            self.blank = False
 
     def set_segments_at(self, index: int, mask: int, ch: Optional[str] = None) -> None:
         """Raw 16-bit segment mask for one cell (used by tests)."""
@@ -489,28 +494,29 @@ class Display:
 
     # ------------------------------------------------- grid / lamp selectors
     def select_grid(self, value: int, commit: bool = True) -> None:
-        """0xA2xx / PPI port B: 0..7 = active digit, 8 = all grids off.
+        with self._lock:
+            """0xA2xx / PPI port B: 0..7 = active digit, 8 = all grids off.
 
-        ``commit`` decides whether the latched segment bytes are shown on the
-        newly selected digit; the 8255 path turns it off when the firmware
-        selects the digit *before* writing the segments.
+            ``commit`` decides whether the latched segment bytes are shown on the
+            newly selected digit; the 8255 path turns it off when the firmware
+            selects the digit *before* writing the segments.
 
-        The ROM only ever emits ``R0 & 7`` (0..7) plus the blank code 8
-        (ROM 0x82E1), so any other value - a BCD digit > 7 or garbage -
-        blanks the grid instead of addressing a cell the firmware never
-        lights.
-        """
-        value &= 0xFF
-        if value > 7:
-            self.grid = -1
-            self.blank = True
-            return
-        self.grid = value
-        self.blank = False
-        if commit:
-            cell = self._slot(value)
-            if cell is not None:
-                self._apply(cell, self.seg0, self.seg1)
+            The ROM only ever emits ``R0 & 7`` (0..7) plus the blank code 8
+            (ROM 0x82E1), so any other value - a BCD digit > 7 or garbage -
+            blanks the grid instead of addressing a cell the firmware never
+            lights.
+            """
+            value &= 0xFF
+            if value > 7:
+                self.grid = -1
+                self.blank = True
+                return
+            self.grid = value
+            self.blank = False
+            if commit:
+                cell = self._slot(value)
+                if cell is not None:
+                    self._apply(cell, self.seg0, self.seg1)
 
     def write_lamp(self, value: int, low: Optional[int] = None) -> None:
         """0xA1xx write: bit7 preserved, bits 0..3 = gray digit, 4..6 = bank."""
@@ -631,8 +637,7 @@ def _locked(fn):
 
 
 for _name in (
-    "write_digit_byte", "write_segment_byte", "latch_segments", "commit_grid",
-    "write_char", "set_segments_at", "select_grid", "write_lamp",
+    "set_segments_at", "write_lamp",
     "lamp_readback", "set_brightness", "clear", "text", "cell_segments",
     "cell_segments16", "cell_char", "annunciators", "glyph_rows",
     "render_rows", "describe",
