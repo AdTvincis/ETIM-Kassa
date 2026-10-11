@@ -740,44 +740,21 @@ class CPU8051:
         # ~84% of everything the firmware executes (MOV DPTR and MOVX @DPTR,A
         # alone are ~30%), so they must be tested before the long tail.
         # The sets are disjoint, so their relative order carries no meaning.
+        if op == 0xD5:                                             # DJNZ direct,rel
+            addr = romb(p)
+            value = (self._dir_read(addr) - 1) & 0xFF
+            self._dir_write(addr, value)
+            self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF if value else p + 2
+            return 2
+        # ---- decode/execute -------------------------------------------------
+        if op == 0x00:                                              # NOP
+            self.pc = p
+            return 1
         if op == 0x90:                                             # MOV DPTR,#imm16
             self.pc = p + 2
             self.sfr[SFR_DPH] = romb(p)
             self.sfr[SFR_DPL] = romb(p + 1)
             return 2
-        if op == 0xF0:                                             # MOVX @DPTR,A
-            self.pc = p
-            bus.ext_write(self.dptr, self.sfr[SFR_ACC])
-            return 2
-        if 0xE8 <= op <= 0xEF:                                     # MOV A,Rn
-            self.pc = p
-            self.acc = self._r(op & 7)
-            self.set_p()
-            return 1
-        if op in (0xE6, 0xE7):                                     # MOV A,@Ri
-            self.pc = p
-            self.acc = ram[self._ri(op & 1)]
-            self.set_p()
-            return 1
-        if 0xD8 <= op <= 0xDF:                                     # DJNZ Rn,rel
-            n = op & 7
-            value = (self._r(n) - 1) & 0xFF
-            self._set_r(n, value)
-            self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF if value else p + 1
-            return 2
-        if 0x08 <= op <= 0x0F:                                     # INC Rn
-            self.pc = p
-            n = op & 7
-            self._set_r(n, (self._r(n) + 1) & 0xFF)
-            return 1
-        if op == 0x25:                                             # ADD A,direct
-            self.pc = p + 1
-            self._add(self._dir_read(romb(p)), 0)
-            return 1
-        if 0xF8 <= op <= 0xFF:                                     # MOV Rn,A
-            self.pc = p
-            self._set_r(op & 7, self.sfr[SFR_ACC])
-            return 1
         if op == 0xE5:                                             # MOV A,direct
             self.pc = p + 1
             addr = romb(p)
@@ -794,6 +771,87 @@ class CPU8051:
                 self.acc = self.sfr[addr]
             self.set_p()
             return 1
+        if 0xF8 <= op <= 0xFF:                                     # MOV Rn,A
+            self.pc = p
+            self._set_r(op & 7, self.sfr[SFR_ACC])
+            return 1
+        if op == 0xF0:                                             # MOVX @DPTR,A
+            self.pc = p
+            bus.ext_write(self.dptr, self.sfr[SFR_ACC])
+            return 2
+        if 0xE8 <= op <= 0xEF:                                     # MOV A,Rn
+            self.pc = p
+            self.acc = self._r(op & 7)
+            self.set_p()
+            return 1
+        if op == 0xB4:                                             # CJNE A,#imm,rel
+            left, right = self.sfr[SFR_ACC], romb(p)
+            self.pc = p + 2
+            self._cjne(left, right)
+            if left != right:
+                self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
+            return 2
+        if op == 0x93:                                             # MOVC A,@A+DPTR
+            self.pc = p
+            self.acc = romb((self.sfr[SFR_ACC] + self.dptr) & 0xFFFF)
+            return 2
+        if op == 0x60:                                             # JZ
+            self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF if self.sfr[SFR_ACC] == 0 else p + 1
+            return 2
+        if op in (0xE6, 0xE7):                                     # MOV A,@Ri
+            self.pc = p
+            self.acc = ram[self._ri(op & 1)]
+            self.set_p()
+            return 1
+        if op == 0xE4:                                              # CLR A
+            self.pc = p
+            self.acc = 0
+            return 1
+        if op == 0xA3:                                             # INC DPTR
+            self.pc = p
+            self.dptr = (self.dptr + 1) & 0xFFFF
+            return 2
+        if 0x28 <= op <= 0x2F:                                     # ADD A,Rn
+            self.pc = p
+            self._add(self._r(op & 7), 0)
+            return 1
+        if op == 0x34:                                             # ADDC A,#imm
+            self.pc = p + 1
+            self._add(romb(p), sfr[SFR_PSW] & 0x80)
+            return 1
+        if op == 0x50:                                             # JNC
+            self.pc = p + 1 if (sfr[SFR_PSW] & 0x80) else (p + 1 + _signed(romb(p))) & 0xFFFF
+            return 2
+        if op in (0x04, 0x05, 0x06, 0x07):
+            return self._inc_family(op, p, romb)
+        if 0xD8 <= op <= 0xDF:                                     # DJNZ Rn,rel
+            n = op & 7
+            value = (self._r(n) - 1) & 0xFF
+            self._set_r(n, value)
+            self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF if value else p + 1
+            return 2
+        if 0x08 <= op <= 0x0F:                                     # INC Rn
+            self.pc = p
+            n = op & 7
+            self._set_r(n, (self._r(n) + 1) & 0xFF)
+            return 1
+        if op == 0x25:                                             # ADD A,direct
+            self.pc = p + 1
+            self._add(self._dir_read(romb(p)), 0)
+            return 1
+        if op == 0xE0:                                             # MOVX A,@DPTR
+            self.pc = p
+            self.acc = bus.ext_read(self.dptr) & 0xFF
+            self.set_p()
+            return 2
+        if op == 0x64:                                             # XRL A,#imm
+            self.pc = p + 1
+            self.acc = self.sfr[SFR_ACC] ^ romb(p)
+            return 1
+        if op == 0x24:                                             # ADD A,#imm
+            self.pc = p + 1
+            self._add(romb(p), 0)
+            return 1
         if op == 0x12:                                             # LCALL
             target = romb(p) << 8 | romb(p + 1)
             self.pc = p + 2
@@ -803,42 +861,151 @@ class CPU8051:
         if op == 0x22:                                             # RET
             self.pop_pc()
             return 2
-        if op == 0x93:                                             # MOVC A,@A+DPTR
-            self.pc = p
-            self.acc = romb((self.sfr[SFR_ACC] + self.dptr) & 0xFFFF)
+        if op == 0x75:                                             # MOV direct,#imm
+            self.pc = p + 2
+            self._dir_write(romb(p), romb(p + 1))
             return 2
-        # ---- decode/execute -------------------------------------------------
-        if op == 0x00:                                              # NOP
-            self.pc = p
+        if 0x78 <= op <= 0x7F:                                      # MOV Rn,#imm
+            self.pc = p + 1
+            self._set_r(op & 7, romb(p))
+            return 1
+        if op == 0xF5:                                              # MOV direct,A
+            self.pc = p + 1
+            self._dir_write(romb(p), self.sfr[SFR_ACC])
             return 1
         # ================================ MOV A, #imm / direct / @Ri / Rn / R
         if op == 0x74:                                              # MOV A,#imm
             self.pc = p + 1
             self.acc = romb(p)
             return 1
-        if op == 0xF5:                                              # MOV direct,A
+        if op == 0x80:                                             # SJMP
+            self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF
+            return 2
+        if op == 0x70:                                             # JNZ
+            self.pc = p + 1 if self.sfr[SFR_ACC] == 0 else (p + 1 + _signed(romb(p))) & 0xFFFF
+            return 2
+        if op == 0xB5:                                             # CJNE A,direct,rel
+            left, right = self.sfr[SFR_ACC], self._dir_read(romb(p))
+            self.pc = p + 2
+            self._cjne(left, right)
+            if left != right:
+                self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
+            return 2
+        if op in (0xC2, 0xD2, 0xB2):                               # CLR/SETB/CPL bit
             self.pc = p + 1
-            self._dir_write(romb(p), self.sfr[SFR_ACC])
-            return 1
-        if op == 0xE4:                                              # CLR A
+            addr = romb(p)
+            if op == 0xC2:
+                self._bit_write(addr, 0)
+            elif op == 0xD2:
+                self._bit_write(addr, 1)
+            else:
+                self._bit_write(addr, 0 if self._bit(addr) else 1)
+            return 2
+        # ================================================================ PUSH/POP
+        if op == 0xC0:
+            self.pc = p + 1
+            self.push(self._dir_read(romb(p)))
+            return 2
+        if op == 0xD0:
+            self.pc = p + 1
+            self._dir_write(romb(p), self.pop())
+            return 2
+        if op == 0x20:                                             # JB bit,rel
+            bit = self._bit(romb(p))
+            self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF if bit else p + 2
+            return 2
+        if op == 0x30:                                             # JNB bit,rel
+            bit = self._bit(romb(p))
+            self.pc = p + 2 if bit else (p + 2 + _signed(romb(p + 1))) & 0xFFFF
+            return 2
+        if op in (0xF6, 0xF7):                                      # MOV @Ri,A
             self.pc = p
-            self.acc = 0
+            ram[self._ri(op & 1)] = self.sfr[SFR_ACC]
+            return 1
+        # ========================================================== logical ops
+        if op == 0x54:                                             # ANL A,#imm
+            self.pc = p + 1
+            self.acc = self.sfr[SFR_ACC] & romb(p)
+            return 1
+        # ============================================================ bit ops
+        if op in (0xC3, 0xD3, 0xB3):                               # CLR/SETB/CPL C
+            self.pc = p
+            if op == 0xC3:
+                self.sfr[SFR_PSW] &= 0x7F
+            elif op == 0xD3:
+                self.sfr[SFR_PSW] |= 0x80
+            else:
+                self.sfr[SFR_PSW] ^= 0x80
+            return 1
+        # ============================================================== branches
+        if op == 0x02:                                             # LJMP
+            self.pc = romb(p) << 8 | romb(p + 1)
+            return 2
+        if 0x98 <= op <= 0x9F:
+            self.pc = p
+            self._sub(self._r(op & 7), sfr[SFR_PSW] & 0x80)
+            return 1
+        if op == 0x32:                                             # RETI
+            self.pop_pc()
+            self.irq_level = 0
+            return 2
+        if op in (0x01, 0x21, 0x41, 0x61, 0x81, 0xA1, 0xC1, 0xE1):  # AJMP
+            # Page bits come from PC **after** the 2-byte instruction
+            # (p + 1), matching disasm/asm51; taking them from p misroutes
+            # every AJMP that sits on a 2 KiB boundary (0x...7FE).
+            page = ((p + 1) & 0xFFFF) & 0xF800
+            target = page | ((op >> 5) << 8) | romb(p)
+            self.pc = target
+            return 2
+        if 0xB8 <= op <= 0xBF:                                     # CJNE Rn,#imm,rel
+            left, right = self._r(op & 7), romb(p)
+            self.pc = p + 2
+            self._cjne(left, right)
+            if left != right:
+                self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
+            return 2
+        if op == 0x13:                                             # RRC A
+            self.pc = p
+            a = self.sfr[SFR_ACC]
+            carry = 0x80 if (self.sfr[SFR_PSW] & 0x80) else 0
+            psw = self.sfr[SFR_PSW] & 0x7F
+            if a & 1:
+                psw |= 0x80
+            self.sfr[SFR_PSW] = psw
+            self.acc = (a >> 1) | carry
+            return 1
+        if op in (0xF2, 0xF3):                                     # MOVX @Ri,A
+            self.pc = p
+            addr = self._ri(op & 1)
+            self._ext_write_banked(addr, self.sfr[SFR_ACC])
+            return 2
+        if op in (0x15, 0x16, 0x17):
+            return self._dec_family(op, p, romb)
+        if op == 0xC4:                                             # SWAP A
+            self.pc = p
+            a = self.sfr[SFR_ACC]
+            self.acc = ((a << 4) | (a >> 4)) & 0xFF
+            return 1
+        if op == 0x95:
+            self.pc = p + 1
+            self._sub(self._dir_read(romb(p)), sfr[SFR_PSW] & 0x80)
+            return 1
+        # ================================================================ INC
+        if op == 0x14:                                             # DEC A
+            self.pc = p
+            self.acc = (self.sfr[SFR_ACC] - 1) & 0xFF
+            return 1
+        if op == 0x44:                                             # ORL A,#imm
+            self.pc = p + 1
+            self.acc = self.sfr[SFR_ACC] | romb(p)
             return 1
         if op == 0xF4:                                              # CPL A
             self.pc = p
             self.acc = self.sfr[SFR_ACC] ^ 0xFF
             return 1
-        if op in (0xF6, 0xF7):                                      # MOV @Ri,A
-            self.pc = p
-            ram[self._ri(op & 1)] = self.sfr[SFR_ACC]
-            return 1
         if op in (0x76, 0x77):                                      # MOV @Ri,#imm
             self.pc = p + 1
             ram[self._ri(op & 1)] = romb(p)
-            return 1
-        if 0x78 <= op <= 0x7F:                                      # MOV Rn,#imm
-            self.pc = p + 1
-            self._set_r(op & 7, romb(p))
             return 1
         if 0xA8 <= op <= 0xAF:                                      # MOV Rn,direct
             self.pc = p + 1
@@ -853,10 +1020,6 @@ class CPU8051:
             src = romb(p)
             dst = romb(p + 1)
             self._dir_write(dst, self._dir_read(src))
-            return 2
-        if op == 0x75:                                             # MOV direct,#imm
-            self.pc = p + 2
-            self._dir_write(romb(p), romb(p + 1))
             return 2
         if op in (0x86, 0x87):                                     # MOV direct,@Ri
             self.pc = p + 1
@@ -879,36 +1042,10 @@ class CPU8051:
             self.acc = bus.ext_read(addr) & 0xFF
             self.set_p()
             return 2
-        if op in (0xF2, 0xF3):                                     # MOVX @Ri,A
-            self.pc = p
-            addr = self._ri(op & 1)
-            self._ext_write_banked(addr, self.sfr[SFR_ACC])
-            return 2
-        if op == 0xE0:                                             # MOVX A,@DPTR
-            self.pc = p
-            self.acc = bus.ext_read(self.dptr) & 0xFF
-            self.set_p()
-            return 2
-        if op == 0xA3:                                             # INC DPTR
-            self.pc = p
-            self.dptr = (self.dptr + 1) & 0xFFFF
-            return 2
         # =============================================================== ADD
-        if op == 0x24:                                             # ADD A,#imm
-            self.pc = p + 1
-            self._add(romb(p), 0)
-            return 1
         if op in (0x26, 0x27):                                     # ADD A,@Ri
             self.pc = p
             self._add(ram[self._ri(op & 1)], 0)
-            return 1
-        if 0x28 <= op <= 0x2F:                                     # ADD A,Rn
-            self.pc = p
-            self._add(self._r(op & 7), 0)
-            return 1
-        if op == 0x34:                                             # ADDC A,#imm
-            self.pc = p + 1
-            self._add(romb(p), sfr[SFR_PSW] & 0x80)
             return 1
         if op == 0x35:                                             # ADDC A,direct
             self.pc = p + 1
@@ -927,27 +1064,10 @@ class CPU8051:
             self.pc = p + 1
             self._sub(romb(p), sfr[SFR_PSW] & 0x80)
             return 1
-        if op == 0x95:
-            self.pc = p + 1
-            self._sub(self._dir_read(romb(p)), sfr[SFR_PSW] & 0x80)
-            return 1
         if op in (0x96, 0x97):
             self.pc = p
             self._sub(ram[self._ri(op & 1)], sfr[SFR_PSW] & 0x80)
             return 1
-        if 0x98 <= op <= 0x9F:
-            self.pc = p
-            self._sub(self._r(op & 7), sfr[SFR_PSW] & 0x80)
-            return 1
-        # ================================================================ INC
-        if op in (0x04, 0x05, 0x06, 0x07):
-            return self._inc_family(op, p, romb)
-        if op == 0x14:                                             # DEC A
-            self.pc = p
-            self.acc = (self.sfr[SFR_ACC] - 1) & 0xFF
-            return 1
-        if op in (0x15, 0x16, 0x17):
-            return self._dec_family(op, p, romb)
         if 0x18 <= op <= 0x1F:                                     # DEC Rn
             self.pc = p
             n = op & 7
@@ -983,11 +1103,6 @@ class CPU8051:
             self.sfr[SFR_PSW] = psw
             self.set_p()
             return 4
-        # ========================================================== logical ops
-        if op == 0x54:                                             # ANL A,#imm
-            self.pc = p + 1
-            self.acc = self.sfr[SFR_ACC] & romb(p)
-            return 1
         if op == 0x55:
             self.pc = p + 1
             self.acc = self.sfr[SFR_ACC] & self._dir_read(romb(p))
@@ -1000,10 +1115,6 @@ class CPU8051:
             self.pc = p
             self.acc = self.sfr[SFR_ACC] & self._r(op & 7)
             return 1
-        if op == 0x44:                                             # ORL A,#imm
-            self.pc = p + 1
-            self.acc = self.sfr[SFR_ACC] | romb(p)
-            return 1
         if op == 0x45:
             self.pc = p + 1
             self.acc = self.sfr[SFR_ACC] | self._dir_read(romb(p))
@@ -1015,10 +1126,6 @@ class CPU8051:
         if 0x48 <= op <= 0x4F:
             self.pc = p
             self.acc = self.sfr[SFR_ACC] | self._r(op & 7)
-            return 1
-        if op == 0x64:                                             # XRL A,#imm
-            self.pc = p + 1
-            self.acc = self.sfr[SFR_ACC] ^ romb(p)
             return 1
         if op == 0x65:
             self.pc = p + 1
@@ -1057,16 +1164,6 @@ class CPU8051:
             a = self.sfr[SFR_ACC]
             self.acc = (a >> 1) | ((a & 1) << 7)
             return 1
-        if op == 0x13:                                             # RRC A
-            self.pc = p
-            a = self.sfr[SFR_ACC]
-            carry = 0x80 if (self.sfr[SFR_PSW] & 0x80) else 0
-            psw = self.sfr[SFR_PSW] & 0x7F
-            if a & 1:
-                psw |= 0x80
-            self.sfr[SFR_PSW] = psw
-            self.acc = (a >> 1) | carry
-            return 1
         if op == 0x23:                                             # RL A
             self.pc = p
             a = self.sfr[SFR_ACC]
@@ -1082,11 +1179,6 @@ class CPU8051:
                 psw |= 0x80
             self.sfr[SFR_PSW] = psw
             self.acc = result & 0xFF
-            return 1
-        if op == 0xC4:                                             # SWAP A
-            self.pc = p
-            a = self.sfr[SFR_ACC]
-            self.acc = ((a << 4) | (a >> 4)) & 0xFF
             return 1
         if op in (0xD4,):                                          # DA A
             self.pc = p
@@ -1124,31 +1216,6 @@ class CPU8051:
             ram[ri] = (old & 0xF0) | (a & 0x0F)
             self.acc = (a & 0xF0) | (old & 0x0F)
             return 1
-        # ================================================================ PUSH/POP
-        if op == 0xC0:
-            self.pc = p + 1
-            self.push(self._dir_read(romb(p)))
-            return 2
-        if op == 0xD0:
-            self.pc = p + 1
-            self._dir_write(romb(p), self.pop())
-            return 2
-        # ============================================================== branches
-        if op == 0x02:                                             # LJMP
-            self.pc = romb(p) << 8 | romb(p + 1)
-            return 2
-        if op == 0x32:                                             # RETI
-            self.pop_pc()
-            self.irq_level = 0
-            return 2
-        if op in (0x01, 0x21, 0x41, 0x61, 0x81, 0xA1, 0xC1, 0xE1):  # AJMP
-            # Page bits come from PC **after** the 2-byte instruction
-            # (p + 1), matching disasm/asm51; taking them from p misroutes
-            # every AJMP that sits on a 2 KiB boundary (0x...7FE).
-            page = ((p + 1) & 0xFFFF) & 0xF800
-            target = page | ((op >> 5) << 8) | romb(p)
-            self.pc = target
-            return 2
         if op in (0x11, 0x31, 0x51, 0x71, 0x91, 0xB1, 0xD1, 0xF1):  # ACALL
             page = ((p + 1) & 0xFFFF) & 0xF800    # same PC+2 rule as AJMP
             target = page | ((op >> 5) << 8) | romb(p)
@@ -1159,34 +1226,8 @@ class CPU8051:
         if op == 0x73:                                             # JMP @A+DPTR
             self.pc = (self.dptr + self.sfr[SFR_ACC]) & 0xFFFF
             return 2
-        if op == 0x80:                                             # SJMP
-            self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF
-            return 2
         if op == 0x40:                                             # JC
             self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF if (sfr[SFR_PSW] & 0x80) else p + 1
-            return 2
-        if op == 0x50:                                             # JNC
-            self.pc = p + 1 if (sfr[SFR_PSW] & 0x80) else (p + 1 + _signed(romb(p))) & 0xFFFF
-            return 2
-        if op == 0x60:                                             # JZ
-            self.pc = (p + 1 + _signed(romb(p))) & 0xFFFF if self.sfr[SFR_ACC] == 0 else p + 1
-            return 2
-        if op == 0x70:                                             # JNZ
-            self.pc = p + 1 if self.sfr[SFR_ACC] == 0 else (p + 1 + _signed(romb(p))) & 0xFFFF
-            return 2
-        if op == 0xB4:                                             # CJNE A,#imm,rel
-            left, right = self.sfr[SFR_ACC], romb(p)
-            self.pc = p + 2
-            self._cjne(left, right)
-            if left != right:
-                self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
-            return 2
-        if op == 0xB5:                                             # CJNE A,direct,rel
-            left, right = self.sfr[SFR_ACC], self._dir_read(romb(p))
-            self.pc = p + 2
-            self._cjne(left, right)
-            if left != right:
-                self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
             return 2
         if op in (0xB6, 0xB7):                                     # CJNE @Ri,#imm,rel
             left, right = ram[self._ri(op & 1)], romb(p)
@@ -1194,27 +1235,6 @@ class CPU8051:
             self._cjne(left, right)
             if left != right:
                 self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
-            return 2
-        if 0xB8 <= op <= 0xBF:                                     # CJNE Rn,#imm,rel
-            left, right = self._r(op & 7), romb(p)
-            self.pc = p + 2
-            self._cjne(left, right)
-            if left != right:
-                self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
-            return 2
-        if op == 0xD5:                                             # DJNZ direct,rel
-            addr = romb(p)
-            value = (self._dir_read(addr) - 1) & 0xFF
-            self._dir_write(addr, value)
-            self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF if value else p + 2
-            return 2
-        if op == 0x20:                                             # JB bit,rel
-            bit = self._bit(romb(p))
-            self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF if bit else p + 2
-            return 2
-        if op == 0x30:                                             # JNB bit,rel
-            bit = self._bit(romb(p))
-            self.pc = p + 2 if bit else (p + 2 + _signed(romb(p + 1))) & 0xFFFF
             return 2
         if op == 0x10:                                             # JBC bit,rel
             addr = romb(p)
@@ -1224,26 +1244,6 @@ class CPU8051:
                 self.pc = (p + 2 + _signed(romb(p + 1))) & 0xFFFF
             else:
                 self.pc = p + 2
-            return 2
-        # ============================================================ bit ops
-        if op in (0xC3, 0xD3, 0xB3):                               # CLR/SETB/CPL C
-            self.pc = p
-            if op == 0xC3:
-                self.sfr[SFR_PSW] &= 0x7F
-            elif op == 0xD3:
-                self.sfr[SFR_PSW] |= 0x80
-            else:
-                self.sfr[SFR_PSW] ^= 0x80
-            return 1
-        if op in (0xC2, 0xD2, 0xB2):                               # CLR/SETB/CPL bit
-            self.pc = p + 1
-            addr = romb(p)
-            if op == 0xC2:
-                self._bit_write(addr, 0)
-            elif op == 0xD2:
-                self._bit_write(addr, 1)
-            else:
-                self._bit_write(addr, 0 if self._bit(addr) else 1)
             return 2
         if op == 0x72:                                             # ORL C,bit
             self.pc = p + 1
