@@ -1,22 +1,37 @@
 """How the ETIM ROM dump is turned into a runnable 64 KiB code image.
 
-The only firmware this project runs is ``nm27c512n.hex`` (0x8000..0xFFFF,
-reset vector ``LJMP 0x0A06``).
+The only firmware this project runs is ``nm27c512n.hex``.
 
-The ETIM firmware is split across two devices: the code we have lives entirely
-above 0x8000, and everything it calls below 0x0FFF - including the reset code
-at 0x0A06 and the interrupt handlers - was in the AT89C55's internal ROM, which
-nobody dumped.  There is therefore *no* way to run it completely faithfully.
+Where the image really lives
+----------------------------
+The Intel-HEX records of ``nm27c512n.hex`` carry **programmer offsets**:
+they are written at ``0x8000..0xFFFF``, but the image is the *low* 32 KiB of
+CPU code space (``0x0000..0x7FFF``).  Two pieces of evidence make this a
+fact rather than a hypothesis:
 
-What this module does is make the best available image, and label every part of
-it so the UI can say exactly what is real and what is a stand-in:
+* the bytes at record offset ``0x8000`` are ``02 0A 06`` - ``LJMP 0x0A06``,
+  a real MCS-51 **reset vector**, which only makes sense at CPU ``0x0000``,
+  and its target ``0x0A06`` lies *inside this very image*;
+* interrupt vectors land where an 8051 expects them once the image is
+  rebased (CPU ``0x0003``, ``0x0013``, ``0x0023``), and with the rebase the
+  firmware executes millions of cycles without hitting an undumped address
+  while driving the display and keyboard of the emulated board.
 
-``authoritative``
-    Address ranges that come from the real ETIM dump.
+So :func:`load_firmware` rebases the dump by ``-0x8000``: the CPU starts at
+the **real** reset vector (no trampoline is needed) and everything the image
+provides is real code.  What this dump does *not* contain is the **upper**
+half ``0x8000..0xFFFF``; a fetch there stops the CPU with an honest message.
+
+Provenance labels (``FirmwareProfile.provenance``) tell the UI which byte
+came from where:
+
 ``stub``
-    Ranges we synthesised (reset/vector trampolines, ``RET`` padding).
+    Ranges we synthesised (only when the real reset vector is unusable -
+    e.g. a dump that lacks bytes at ``0x0000``; the normal ETIM path has
+    none).
 ``missing``
-    Ranges with no code at all; hitting them stops the CPU and is reported.
+    Ranges with no code at all (for the rebased ETIM image: the upper half);
+    hitting them stops the CPU and is reported.
 """
 
 from __future__ import annotations
@@ -26,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .rom import ROM
-from .shim import SHIM_BASE, build_shim
+from .shim import build_shim
 
 __all__ = ["FirmwareProfile", "load_firmware", "available_images", "PROFILES"]
 
@@ -35,9 +50,15 @@ FIRMWARE_DIR = os.path.join(HERE, "firmware")
 
 ETIM_IMAGE = "nm27c512n.hex"
 
-# Where the real ETIM code starts (its first byte is a LJMP dispatch table).
-ETIM_ENTRY = 0x8000
-# The reset target named by the ETIM reset vector (in the missing low ROM).
+# The Intel-HEX records of the ETIM dump are written at programmer offsets
+# 0x8000..0xFFFF; the image itself is CPU code space 0x0000..0x7FFF (see the
+# module docstring for the evidence).  A dump with this exact coverage is
+# rebased by -0x8000 when loaded.
+ETIM_RECORD_BASE = 0x8000
+# Where the real ETIM code starts in CPU space after the rebase.
+ETIM_ENTRY = 0x0000
+# The reset target named by the ETIM reset vector (LJMP 0x0A06); with the
+# rebase it lies inside the image, so the reset path is real code.
 ETIM_LOW_ENTRY = 0x0A06
 
 
@@ -123,6 +144,25 @@ def _ret_stub_gaps(rom: ROM, skip_below: int = 0x0000) -> List[Tuple[int, int]]:
     return filled
 
 
+def _rebase_low32k(rom: ROM) -> bool:
+    """Shift a programmer-offset dump (records at 0x8000..0xFFFF) down to
+    the CPU addresses it really occupies (0x0000..0x7FFF).
+
+    Returns ``True`` when the shift happened.  See the module docstring for
+    the evidence: record 0x8000 holds the reset vector ``LJMP 0x0A06`` whose
+    target lies inside the same image, so the records are programmer offsets,
+    not CPU addresses.
+    """
+    if rom.coverage() != (ETIM_RECORD_BASE, 0xFFFF):
+        return False
+    shifted = {addr - ETIM_RECORD_BASE: value for addr, value in rom._mem.items()}
+    rom._mem.clear()
+    for addr, value in shifted.items():
+        rom._mem[addr] = value
+    rom.mapped = len(rom._mem)
+    return True
+
+
 def load_firmware(
     primary: str = ETIM_IMAGE,
     secondary: Optional[str] = None,
@@ -139,8 +179,10 @@ def load_firmware(
     secondary:
         Optional dump used only to fill address ranges the primary lacks.
     reset_to_entry:
-        Point the synthesised reset vector at the first byte that *is*
-        present, instead of at an address nobody dumped.
+        When the image provides no usable reset vector, point the synthesised
+        one at a byte the image really has, instead of at an address nobody
+        dumped.  (The rebased ETIM dump has a real reset vector, so this only
+        matters for other images.)
     pad_missing:
         Replace remaining gaps with ``RET``.  Off by default and it should stay
         off: a ``RET`` there pops a zero return address and silently lands the
@@ -153,6 +195,7 @@ def load_firmware(
     if not os.path.isfile(path):
         raise FileNotFoundError(f"firmware image not found: {path}")
     real = ROM(primary).load_file(path)
+    rebased = _rebase_low32k(real)
     coverage = real.coverage()
     profile = FirmwareProfile(
         name=primary,
@@ -180,36 +223,60 @@ def load_firmware(
 
     _merge(profile.rom, real, only_gaps=False)         # real bytes always win
 
-    # The reset/vector trampolines belong to the missing low ROM: synthesise them.
-    # The target is the first byte the primary image actually provides, so the
-    # machine starts in real code instead of jumping into an undumped gap (or
-    # into the shim itself, which is an infinite self-loop).
-    reset_target = coverage[0] if coverage else 0x0000
-    shim = build_shim(reset_target)
-    for addr, value in shim.items():
-        profile.rom._mem[addr] = value
-    profile.reset_pc = 0x0000
-    profile.stub.append((min(shim), max(shim)))
-    profile.notes.append(
-        f"reset borrowed: the real reset vector lives in the missing half of the "
-        f"ROM, so a 3-byte LJMP to 0x{reset_target:04X} (the first byte this "
-        f"image provides) was synthesised"
-    )
+    if rebased:
+        profile.notes.append(
+            f"records rebased by -0x{ETIM_RECORD_BASE:04X}: the hex carries "
+            f"programmer offsets, the image is CPU 0x0000..0x7FFF "
+            f"(record 0x{ETIM_RECORD_BASE:04X} is the reset vector LJMP 0x0A06)"
+        )
+
+    # The reset vector: real bytes when the image provides them (the rebased
+    # ETIM dump does - its first byte is ``LJMP 0x0A06``).  Only when the
+    # image lacks a usable vector is a trampoline synthesised, and then it
+    # points at the first byte the image really has.
+    reset_target: Optional[int] = None
+    if profile.rom.byte(0x0000) == 0x02:
+        candidate = profile.rom.word(0x0001)
+        if profile.rom.is_mapped(candidate):
+            reset_target = candidate
+    if reset_target is not None:
+        profile.reset_pc = 0x0000
+        profile.notes.append(
+            f"reset vector is REAL: 0x0000 = LJMP 0x{reset_target:04X}, "
+            f"covered by this image - no trampoline needed"
+        )
+    else:
+        reset_target = coverage[0] if coverage else 0x0000
+        shim = build_shim(reset_target)
+        for addr, value in shim.items():
+            profile.rom._mem[addr] = value
+        profile.reset_pc = 0x0000
+        profile.stub.append((min(shim), max(shim)))
+        profile.notes.append(
+            f"reset borrowed: this image provides no usable reset vector, so a "
+            f"3-byte LJMP to 0x{reset_target:04X} (the first byte it provides) "
+            f"was synthesised"
+        )
     if coverage and coverage[0] != 0x0000:
         profile.notes.append(
             f"execution starts at 0x{coverage[0]:04X}; the vector table at "
             f"0x0000..0x{coverage[0] - 1:04X} was not dumped, so no interrupt "
             f"can be serviced"
         )
+    if rebased:
+        profile.notes.append(
+            f"the upper half 0x{ETIM_RECORD_BASE:04X}..0xFFFF is NOT in this "
+            f"dump; a fetch there stops the CPU with an explicit message"
+        )
 
     if pad_missing:
-        filled = [r for r in _ret_stub_gaps(profile.rom, SHIM_BASE + 0x40) if r[1] > r[0]]
+        filled = [r for r in _ret_stub_gaps(profile.rom, 0x0000) if r[1] > r[0]]
         for lo, hi in filled:
             profile.stub.append((lo, hi))
         if filled:
             total = sum(hi - lo + 1 for lo, hi in filled)
             profile.notes.append(
-                f"{total} bytes of undumped low memory padded with RET so a call "
+                f"{total} bytes of undumped memory padded with RET so a call "
                 f"into the missing ROM returns instead of halting the CPU"
             )
 

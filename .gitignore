@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Локальные артефакты сессий и отладки
+_session_import/
+_forensic*.py
+*.log
+
+# Редакторы / ОС
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

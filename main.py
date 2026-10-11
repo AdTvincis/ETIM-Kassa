@@ -130,8 +130,10 @@ class EmulatorBackend(Backend):
         self.cpu.pc = self.profile.reset_pc
 
     def run_budget(self, cycles: int) -> None:
-        # ``run`` останавливается сам, если исполнение уходит в неотданную
-        # половину ПЗУ, поэтому цикл ограничен и не может зависнуть.
+        # Прошивка после rebasing целиком лежит в нижних 32 КиБ; если бы
+        # исполнение ушло в несданную верхнюю половину (0x8000..0xFFFF),
+        # ``run`` остановил бы CPU сам с честным сообщением, поэтому цикл
+        # ограничен и не может зависнуть.
         if self.cpu.halted:
             return
         self.cpu.run(cycles)

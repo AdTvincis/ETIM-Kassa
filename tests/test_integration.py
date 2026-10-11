@@ -4,10 +4,12 @@
 Что проверяется (без единого Tkinter-окна, только headless- API):
 
 1. **Загрузка настоящего дампа.**  ``firmware/nm27c512n.hex`` читается,
-   покрытие адресов и происхождение байтов совпадают с документацией, а
-   разумный бюджет исполнения отрабатывает **без исключений**.  Прошивка
-   останавливается на недампленной половине ПЗУ -- это честный, ожидаемый
-   исход (``FirmwareProfile.provenance``), а не падение.
+   записи rebased на нижние 32 КиБ CPU (смещения программатора 0x8000 ->
+   адреса 0x0000, см. ``m8051/firmware_profile``), происхождение байтов
+   совпадает с документацией, а разумный бюджет исполнения отрабатывает
+   **без исключений**: настоящий вектор сброса ``LJMP 0x0A06`` внутри
+   картинки.  Верхняя половина ``0x8000..0xFFFF`` в дамп не попала -- обращение
+   туда честно останавливает CPU (``FirmwareProfile.provenance``), а не падение.
 2. **Полная продажа на демо-прошивке.**  Тот же API, что в
    ``tests/test_demo_firmware.py`` (``build_demo`` + ``ROM`` + ``CPU8051`` +
    ``keyboard.press/release`` + ``run_steps``), но уже на настоящей плате
@@ -256,7 +258,13 @@ class TestFirmwareImagesLoad(unittest.TestCase):
         self.assertIn(ETIM_DUMP, images)
         self.assertEqual(ETIM_IMAGE, ETIM_DUMP)
 
-    def test_etim_dump_covers_the_upper_half(self):
+    def test_etim_dump_records_carry_programmer_offsets(self):
+        """Сырой hex: записи записаны по смещениям программатора 0x8000..0xFFFF.
+
+        Сама картинка -- нижние 32 КиБ CPU (0x0000..0x7FFF): ``load_firmware``
+        делает rebasing, см. m8051/firmware_profile (запись 0x8000 -- это
+        настоящий вектор сброса ``LJMP 0x0A06``).
+        """
         rom = ROM(ETIM_DUMP).load_file(os.path.join(ROOT, "firmware", ETIM_DUMP))
         low, high = rom.coverage()
         self.assertEqual((low, high), (0x8000, 0xFFFF))
@@ -265,11 +273,18 @@ class TestFirmwareImagesLoad(unittest.TestCase):
     def test_etim_profile_marks_flash_and_missing_honestly(self):
         profile = load_firmware(primary=ETIM_DUMP, secondary=None)
         self.assertEqual(profile.reset_pc, 0x0000)
-        self.assertEqual(profile.provenance(0x8000), "flash")
-        self.assertEqual(profile.provenance(0x0A06), "missing",
-                         "вектор сброса 0x0A06 не в дампе -- это известный факт")
-        # синтезированный вектор -- LJMP на первый реальный байт
+        # после rebasing (-0x8000) картинка занимает нижние 32 КиБ:
+        # вектор сброса и цель 0x0A06 -- настоящий флеш
+        self.assertEqual(profile.provenance(0x0000), "flash")
+        self.assertEqual(profile.provenance(0x0A06), "flash",
+                         "после rebasing цель сброса 0x0A06 внутри картинки")
+        # а верхняя половина в этот дамп не попала
+        self.assertEqual(profile.provenance(0x8000), "missing",
+                         "верхняя половина 0x8000..0xFFFF не в дампе")
+        self.assertEqual(profile.provenance(0xFFFF), "missing")
+        # вектор сброса -- настоящие байты картинки: LJMP 0x0A06
         self.assertEqual(profile.rom.byte(0x0000), 0x02)
+        self.assertEqual(profile.rom.word(0x0001), 0x0A06)
         self.assertGreater(profile.missing_count(), 0)
         self.assertTrue(profile.notes, "происхождение байтов обязано описываться")
 
@@ -296,8 +311,13 @@ class TestFirmwareImagesLoad(unittest.TestCase):
     def test_etim_backend_runs_the_budget_without_exceptions(self):
         status = self._run_budget_without_exceptions("etim")
         self.assertEqual(status["source"], "etim")
-        self.assertEqual(status["missing_pc"] & 0xFF00, 0x0A00,
-                         "ETIM упирается в 0x0A06 -- в недампленную половину")
+        # после rebasing прошивка целиком лежит в нижних 32 КиБ: бюджет она
+        # должна отработать, а не упереться в недампленную половину
+        self.assertFalse(status["halted"],
+                         "прошивка остановилась: %s" % status.get("reason"))
+        self.assertIsNone(status["missing_pc"],
+                          "не должно быть обращения к непокрытому адресу: %s"
+                          % status.get("reason"))
 
     def test_emulator_backends_expose_the_ui_contract(self):
         """То, что ``ui/app.py`` и ``main.py`` ждут от бэкенда (headless)."""
@@ -559,8 +579,8 @@ class TestRecoveredBackendSmoke(unittest.TestCase):
         self.assertGreaterEqual(status["functions_loaded"], 100,
                                 "дамп не загрузился")
         self.assertEqual(status["functions_failed"], 0)
-        self.assertFalse(status["entry_covered"],
-                         "вектор сброса 0x0A06 заведомо вне дампа")
+        self.assertTrue(status["entry_covered"],
+                        "после rebasing вектор сброса 0x0A06 покрыт дампом")
 
     def test_recovered_backend_runs_a_budget_without_exceptions(self):
         backend = m.make_backend("recovered", _args())

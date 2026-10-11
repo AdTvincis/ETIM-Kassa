@@ -1,12 +1,14 @@
-"""Low-ROM shims for the cash-register firmware image.
+"""Reset/vector fallback for firmware images that lack a usable reset vector.
 
-``nm27c512n.hex`` covers ``0x8000..0xFFFF`` and its reset vector does
-``LJMP 0x0A06`` - the lower half of the program (``0x0000..0x7FFF``) lived in
-a second device (the AT89C55's internal ROM) and was never dumped.
+The ETIM dump ``nm27c512n.hex`` does NOT need this shim: its records are
+programmer offsets, the image really lives at ``0x0000..0x7FFF`` (see
+:mod:`m8051.firmware_profile`), and its first bytes are the genuine reset
+vector ``LJMP 0x0A06``.  ``load_firmware`` only builds a shim when an image
+provides no usable vector of its own.
 
 A shim here is *transparent*: it never pretends to be firmware.  It only
-supplies the reset/vector trampolines that the missing low ROM would contain,
-so the real code that *is* present gets to execute on the emulated board.
+supplies the reset/vector trampolines such an image would be missing, so the
+real code that *is* present gets to execute on the emulated board.
 Everything still runs as genuine MCS-51 machine code through the core.
 """
 

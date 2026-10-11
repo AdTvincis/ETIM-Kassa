@@ -778,7 +778,6 @@ class TestRealHexRunner(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from recover.hal import CashRegisterHAL, load_rom
-        from diagnose_consumers import *  # noqa - placeholder, replaced below
         cls.load_rom = load_rom
         cls.CashRegisterHAL = CashRegisterHAL
         cls.rom = load_rom()
