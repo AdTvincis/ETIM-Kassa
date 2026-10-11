@@ -12,13 +12,18 @@ accessors snapshot strings inside that lock, so a torn read is impossible.
 Honesty rules
 -------------
 * ``boot()`` never raises and never invents a program.  The reset vector of
-  ``firmware/nm27c512n.hex`` is ``LJMP 0x0A06`` and ``0x0A06`` is *not* in the
-  dumped half of the ROM, so the recovered program cannot start; that fact is
-  what ``status()["reason"]`` reports.
-* ``status()["source"]`` is ``"recovered"`` only when real recovered code is
-  driving the peripherals (the recovered Timer-1 display/keyboard ISR
-  ``FUN_CODE_8135``), and ``"demo"`` when the deterministic built-in sequence
-  is.  The demo path uses the *same* HAL windows as the recovered path.
+  ``firmware/nm27c512n.hex`` (record ``0x8000``: ``LJMP 0x0A06``) points at
+  CPU ``0x0A06`` = record ``0x8A06``, which **is** inside the dumped image -
+  the lower half ``0x0000..0x7FFF`` of CPU space (the hex's record addresses
+  ``0x8000..0xFFFF`` are exactly that half).  So the original bytes boot from
+  the real reset vector through :mod:`recover.realrun` and
+  ``status()["entry_covered"]`` is ``True``.  What the dump does *not* have
+  is the **upper half** ``0x8000..0xFFFF`` of CPU space; if execution ever
+  fetches there, the core halts honestly with a "missing image" error.
+* ``status()["source"]`` is ``"recovered"`` when the real recovered machine
+  bytes are driving the peripherals (the default path), and ``"demo"`` when
+  the deterministic built-in sequence is (explicit ``demo=True`` opt-in
+  only).  The demo path uses the *same* HAL windows as the recovered path.
 * ``run(cycles)`` returns promptly (bounded work per call) and never raises:
   failures are recorded into ``status()["reason"]``.
 """
@@ -41,8 +46,17 @@ __all__ = ["RecoveredFirmwareSession", "DEFAULT_DUMP", "DEFAULT_ROM"]
 DEFAULT_DUMP = "docs/nm27c512n_decompiled.c"
 DEFAULT_ROM = "firmware/nm27c512n.hex"
 
-#: The reset vector the ROM bytes actually contain (ROM 0x8000: 02 0A 06).
+#: The reset vector's **record** address - the file stores the image at
+#: record 0x8000..0xFFFF (Ghidra's load address), and the bytes there are
+#: ``02 0A 06`` = LJMP.  CPU address = record - 0x8000, so the vector bytes
+#: really live at CPU 0x0000, the true 8051 reset address.
 RESET_VECTOR = 0x8000
+
+#: The CPU address the reset vector jumps to (record 0x8A06 = 0x0A06+0x8000).
+RESET_ENTRY = 0x0A06
+
+#: Offset translating record space <-> CPU space (record - 0x8000 = CPU).
+REBASE = 0x8000
 
 #: The recovered interrupt handler that drives the display and samples P1.3.
 #: ROM 0x8135: JBC 17h / JNB 19h / JNB P1.3 / ... (see docs/hardware_evidence.md).
@@ -355,9 +369,11 @@ class RecoveredFirmwareSession:
         self._refresh_facades()
 
         # ---- the real-hex executor: original bytes on the m8051 core -------
-        # Glue only: two real interrupt bodies on the cadences their own reload
-        # values define (see recover.realrun).  Anything that goes wrong here
-        # must not fail the boot - it is recorded and the session falls back.
+        # The runner owns a rebased CPU-space copy (record - 0x8000) and boots
+        # from the real reset vector; the session's ROM stays record-space for
+        # the pseudo-code world (the single translation boundary lives in
+        # recover.realrun).  Anything that goes wrong here must not fail the
+        # boot - it is recorded and the session falls back.
         self.runner = None
         self.consumer_report = {}
         if self.rom is not None:
@@ -371,6 +387,7 @@ class RecoveredFirmwareSession:
 
                 self.runner = RealRunner(hal=self.hal, rom=self.rom)
                 self.consumer_report = diagnose_consumers(program, self.rom)
+                # documented reload values of the two ISR bodies (record cites)
                 self.consumer_report["periods"] = {
                     "timer1": PERIOD_TIMER1,
                     "timer0": PERIOD_TIMER0,
@@ -379,30 +396,20 @@ class RecoveredFirmwareSession:
                 self.runner = None
                 self.consumer_report = {"error": f"{type(exc).__name__}: {exc}"}
 
-        # ---- what does the ROM's reset vector say, and is it covered?
-        entry = 0x0A06
+        # ---- what does the ROM's reset vector say, and is it covered? -----
+        # Record space: the vector bytes sit at record RESET_VECTOR (0x8000).
+        # CPU space: the entry is the word after it, and it is covered when
+        # its record address (entry + REBASE) is inside the dumped image.
+        entry = RESET_ENTRY
         if self.rom is not None and self.rom.byte(RESET_VECTOR) == 0x02:
             entry = self.rom.word(RESET_VECTOR + 1)
         self._entry = entry
-        self._entry_covered = any(
-            fn.address == entry for fn in library.functions.values()
-        ) or entry >= 0x8000
-
-        if self._entry_covered:
-            self._source = "recovered"
-            self._reason = (f"reset vector 0x{RESET_VECTOR:04X} -> 0x{entry:04X} is "
-                            f"covered by the dump")
-            self._halted = False
-            self._running = True
-            return
-
-        self._reason = (
-            f"reset vector 0x{RESET_VECTOR:04X} = LJMP 0x{entry:04X}; "
-            f"0x{entry:04X} is not covered by the dump (missing half of the ROM), "
-            f"so the recovered program cannot start"
+        self._entry_covered = bool(
+            self.rom is not None and self.rom.is_mapped((entry + REBASE) & 0xFFFF)
         )
 
-        # demo exists as an explicit opt-in only; the default never invents
+        # demo exists as an explicit opt-in only; the default never invents.
+        # Checked first so opting in always wins over the covered reset path.
         if self.demo_enabled:
             self._source = "demo"
             self._halted = False
@@ -413,20 +420,25 @@ class RecoveredFirmwareSession:
             self._run_demo_step_locked()
             return
 
-        # DEFAULT: execute the original hex on the m8051 core.  The reset
-        # vector cannot be used (it points into the missing half), so the
-        # scheduler calls the firmware's own interrupt bodies instead.
-        if self.runner is not None:
-            periods = self.consumer_report.get("periods", {})
+        verdict = str(self.consumer_report.get("display_buffer", {}).get("verdict", ""))
+
+        if self._entry_covered and self.runner is not None:
+            # DEFAULT: execute the original hex on the m8051 core, from the
+            # REAL reset vector.  Nothing is scheduled from outside: the
+            # firmware's own main loop boots and its own Timer-0 dispatches
+            # the display mux (CPU 0x02D9).  Timer-1 is never started by the
+            # idle firmware, which the stats report truthfully as 0.
             self._source = "recovered"
-            self._isr_active = True
-            verdict = str(self.consumer_report.get("display_buffer", {}).get("verdict", ""))
-            self._reason += (
-                f"; running the ORIGINAL bytes on the m8051 core "
-                f"(recover.realrun): refresh ISR 0x8135 every "
-                f"{periods.get('timer1', PERIOD_TIMER1)} cycles, display mux "
-                f"0x82D9 every {periods.get('timer0', PERIOD_TIMER0)} cycles; "
-                f"no pseudo-code interpreter involved"
+            self._isr_active = False              # real vectors, no pseudo ISR
+            self._reason = (
+                f"reset vector record 0x{RESET_VECTOR:04X} = LJMP 0x{entry:04X}; "
+                f"CPU 0x{entry:04X} (record 0x{(entry + REBASE) & 0xFFFF:04X}) is "
+                f"covered by the dump, so the ORIGINAL bytes boot from the real "
+                f"reset vector on the m8051 core (recover.realrun): the "
+                f"firmware's own timers dispatch its ISRs (display mux CPU "
+                f"0x02D9); no pseudo-code interpreter involved; NOT dumped: the "
+                f"upper half 0x8000..0xFFFF of CPU space - execution halts "
+                f"honestly if it ever fetches there"
             )
             if verdict:
                 self._reason += f"; consumer: {verdict}"
@@ -434,7 +446,22 @@ class RecoveredFirmwareSession:
             self._running = True
             return
 
-        # no ROM image at all: drive the pseudo-code refresh ISR when present
+        if self._entry_covered:
+            self._reason = (
+                f"reset vector record 0x{RESET_VECTOR:04X} = LJMP 0x{entry:04X} is "
+                f"covered by the dump, but the real-hex executor is unavailable: "
+                f"{self.consumer_report.get('error', 'no ROM image')}"
+            )
+        else:
+            self._reason = (
+                f"reset vector record 0x{RESET_VECTOR:04X} = LJMP 0x{entry:04X}; "
+                f"CPU 0x{entry:04X} (record 0x{(entry + REBASE) & 0xFFFF:04X}) is "
+                f"not in this dump - only the lower half 0x0000..0x7FFF of CPU "
+                f"space survived - so the recovered program cannot start"
+            )
+
+        # no ROM image (or executor failure): drive the pseudo-code refresh
+        # ISR when present
         isr = library.functions.get(REFRESH_ISR)
         self._isr_active = isr is not None and not isr.is_stub
         if self._isr_active:
@@ -687,9 +714,10 @@ class RecoveredFirmwareSession:
     def invoke(self, name: str, *args) -> Dict[str, Any]:
         """Call one recovered function directly (diagnostics / tests).
 
-        Returns a dict instead of raising, and records the missing-half calls
-        the invocation made.  This is how the recovered display path can be
-        driven even though the reset vector itself is missing.
+        Returns a dict instead of raising, and records the missing-firmware
+        calls the invocation made.  This is the pseudo-code world's direct
+        entry into a single ``FUN_CODE_xxxx`` body - independent of the
+        real-hex path, which boots from the reset vector instead.
         """
         with self._lock:
             if not self._booted:

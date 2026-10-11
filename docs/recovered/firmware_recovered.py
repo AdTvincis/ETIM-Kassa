@@ -5,7 +5,8 @@ Do not edit by hand; regenerate instead.
 
 Status values
 -------------
-ok           the body parses and is backed by bytes at 0x8000..0xFFFF
+ok           the body parses and is backed by dump bytes at 0x8000..0xFFFF
+             (record addresses; on the chip those are CPU 0x0000..0x7FFF)
 partial      real statements first, then halt_baddata: it runs up to the
              marker and reports the gap exactly there
 stub         the body is *only* halt_baddata: nothing to execute
@@ -19,7 +20,9 @@ unparseable  recover.cparse rejected the body; see ``reason``
 SOURCE = 'docs\\nm27c512n_decompiled.c'
 DUMP_ROM = (0x8000, 0xffff)
 
-#: Ranges that no dump covers.  Code below 0x8000 is decompiler guesswork.
+#: Ranges no dump record covers.  In this file (record addresses) code
+#: below 0x8000 is decompiler guesswork; on the chip the undumped region
+#: is the upper half of CPU space, which the file has no records for.
 MISSING_RANGES = [[0, 32767]]
 
 #: Call targets outside every dump: name -> (address or None, call count)

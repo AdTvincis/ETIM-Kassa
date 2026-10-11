@@ -8,8 +8,9 @@ __all__ = ["MissingFirmware", "XdataUnmapped", "BadDecompilation", "UnmappedRegi
 class MissingFirmware(RuntimeError):
     """Raised when recovered code needs a location that no dump covers.
 
-    The decompiler invented plausible-looking code for the missing half of the
-    firmware, so executing those paths would produce fiction.  Instead of
+    The decompiler invented plausible-looking code wherever it had no bytes
+    to disassemble (addresses below record ``0x8000`` in the dump), so
+    executing those paths would produce fiction.  Instead of
     returning fabricated values, the runtime raises this: the caller (a test,
     the UI, or a HAL hook) can then decide whether to supply the routine or
     report the gap.

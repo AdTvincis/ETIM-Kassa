@@ -127,9 +127,16 @@ WIRING: Dict[str, object] = {
     "KEY_PRESENT_ACTIVE_HIGH": True,
 
     # -------------------------------------------------------- interrupts
-    # CONFIRMED pattern: 0xDCD5 CLR EX0 / 0xDCE4 CJNE A,#0A0h around the key
-    # ring buffer -> INT0 signals a key event.
-    "INT0_ON_KEYPRESS": True,
+    # DISPROVED as the key path (см. дизассемблинг настоящего вектора INT0,
+    # CPU 0x0003 -> 0x04D1): обработчик гасит сетку индикатора, копирует
+    # внутреннее ОЗУ 0x01..0x7F в XDATA 0x0BD1, пишет magic 0x55/0xAA в
+    # батарейную область 0x83xx и навсегда замирает (SJMP $ при CPU 0x4DF,
+    # EA выключен; при незаданном флаге 0x24.0 — сразу замирает). То есть
+    # INT0 = линия ОТКЛЮЧЕНИЯ ПИТАНИЯ (save state -> halt), а не клавиатура:
+    # подача INT0 по нажатию убивала бы кассу на каждое нажатие.
+    # Механизм импульса сохранён и включается явно: wiring={"INT0_ON_KEYPRESS": True}
+    # (тесты платы так и делают, проверяя саму разводку IRQ).
+    "INT0_ON_KEYPRESS": False,
     "INT0_HOLD_CYCLES": 2_000,
     "EXTRA_IRQ": 0,
 }

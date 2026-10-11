@@ -2,10 +2,11 @@
 
 The file ``docs/nm27c512n_decompiled.c`` is decompiler *pseudocode*: it is not
 C that any compiler will accept, and it is not a complete program either.  This
-package turns the parts that are genuinely backed by bytes in the ROM
-(``0x8000..0xFFFF``) into executable Python, and makes every place where the
-missing half of the firmware was invented by the decompiler explicit at
-runtime instead of silently producing nonsense.
+package turns the parts that are genuinely backed by bytes in the dump
+(records ``0x8000..0xFFFF``; on the chip those bytes are CPU
+``0x0000..0x7FFF`` - see :mod:`m8051.firmware_profile`) into executable
+Python, and makes every place where the decompiler had no bytes and invented
+code explicit at runtime instead of silently producing nonsense.
 
 Modules
 -------

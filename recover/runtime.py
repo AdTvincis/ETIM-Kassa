@@ -122,8 +122,8 @@ class RuntimeHelpers:
     * ``thunk_NAME`` strips its prefix and resolves ``NAME``;
     * ``func_0xNNNN`` is a *known* gap: it increments
       ``machine.missing_calls`` and returns ``0`` (it does **not** raise, so
-      the half of the firmware that was never dumped keeps its call sites
-      executable and countable);
+      call sites the dump has no bytes for keep their calls executable and
+      countable);
     * anything else is recorded in :attr:`unresolved` and raises ``KeyError``
       with the exact identifier, instead of a bare ``NameError``.
     """

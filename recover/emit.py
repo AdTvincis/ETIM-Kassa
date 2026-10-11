@@ -23,9 +23,17 @@ Two artifacts are produced by :func:`emit_c` and :func:`emit_python`:
 
 Honesty rules
 -------------
-* ``0x8000..0xFFFF`` is the real ROM (``firmware/nm27c512n.hex``); anything the
-  dump calls below that is decompiler *fiction* and is emitted with an
-  ``_external`` suffix and an explicit comment.
+* Address spaces in this module are **record addresses** (the addresses the
+  dump file uses): Ghidra loaded ``firmware/nm27c512n.hex`` at ``0x8000``, so
+  ``0x8000..0xFFFF`` is where the real bytes are *in the dump*.  On the real
+  chip the same image occupies CPU code space ``0x0000..0x7FFF`` (record =
+  CPU + 0x8000; record ``0x8000`` is the reset vector ``LJMP 0x0A06`` - see
+  :mod:`m8051.firmware_profile`), and what the chip's dump lacks is the
+  *upper* half ``0x8000..0xFFFF`` of CPU space, for which this file has no
+  records at all.
+* Anything the dump calls below record ``0x8000`` is decompiler *fiction*
+  (no record exists there) and is emitted with an ``_external`` suffix and an
+  explicit comment.
 * Stubs (Ghidra's ``halt_baddata()``) are labelled ``stub``, never "recovered".
 * Nothing is renamed in a way that invents meaning: addresses are preserved and
   the original Ghidra name is kept in a comment wherever it is changed.
@@ -63,10 +71,13 @@ __all__ = [
 ]
 
 # --------------------------------------------------------------------- constants
-#: The dump ``docs/nm27c512n_decompiled.c`` was produced from this image only.
+#: The dump ``docs/nm27c512n_decompiled.c`` was produced from this image only
+#: (record addresses: Ghidra loaded the hex at 0x8000).
 DUMP_ROM_START = 0x8000
 DUMP_ROM_END = 0xFFFF
-#: The other half of the firmware - present in the chip, absent from our dump.
+#: Record addresses no dump covers: below 0x8000 the C file is decompiler
+#: guesswork.  (On the chip, the genuinely undumped region is the *upper* half
+#: of CPU space 0x8000..0xFFFF - it has no records in this file at all.)
 MISSING_ROM_START = 0x0000
 MISSING_ROM_END = 0x7FFF
 
@@ -901,12 +912,17 @@ class CProgram:
                 " * What this is",
                 " * ------------",
                 " * Ghidra decompiled the 27C512 EPROM image firmware/nm27c512n.hex.",
-                " * That image only covers 0x8000..0xFFFF of the 64 KiB code space, so:",
+                " * Its Intel-HEX records sit at programmer offsets 0x8000..0xFFFF,",
+                " * and the addresses below are RECORD addresses (Ghidra's load base).",
+                " * On the real chip the same bytes are CPU 0x0000..0x7FFF (record =",
+                " * CPU + 0x8000; record 0x8000 is the reset vector LJMP 0x0A06), so:",
                 " *",
                 " *   0x8000..0xFFFF  real code - the bytes exist and were disassembled",
-                " *   0x0000..0x7FFF  NOT dumped.  Anything printed for that range is",
-                " *                   decompiler guesswork; such calls are marked",
-                " *                   _external and their bodies are placeholders.",
+                " *   0x0000..0x7FFF  no record of the file lives there.  Anything",
+                " *                   printed for that range is decompiler guesswork;",
+                " *                   such calls are marked _external and their bodies",
+                " *                   are placeholders.  (The chip region this dump",
+                " *                   really lacks is CPU 0x8000..0xFFFF.)",
                 " *",
                 f" * functions in the dump   : {stats['functions']}",
                 f" * real (non-stub) bodies  : {stats['recovered']}",
@@ -1167,10 +1183,12 @@ class CProgram:
         facts = self.facts
         lines = [
             "/* ---- routines outside every dump ------------------------------------",
-            " * The decompiler resolved these call targets to addresses that",
-            " * firmware/nm27c512n.hex does NOT cover (that image starts at 0x8000).",
-            " * They live in the other half of the firmware.  Stubbed here so the",
-            " * file type-checks; the bodies are NOT real and must not be trusted.",
+            " * The decompiler resolved these call targets to record addresses",
+            " * that firmware/nm27c512n.hex does NOT contain (its records start",
+            " * at 0x8000).  No byte of this file stands behind them - on the",
+            " * chip they were part of the code this dump never read.  Stubbed",
+            " * here so the file type-checks; the bodies are NOT real and must",
+            " * not be trusted.",
             " */",
             "",
         ]
@@ -1363,7 +1381,8 @@ def emit_python(
         "",
         "Status values",
         "-------------",
-        "ok           the body parses and is backed by bytes at 0x8000..0xFFFF",
+        "ok           the body parses and is backed by dump bytes at 0x8000..0xFFFF",
+        "             (record addresses; on the chip those are CPU 0x0000..0x7FFF)",
         "partial      real statements first, then halt_baddata: it runs up to the",
         "             marker and reports the gap exactly there",
         "stub         the body is *only* halt_baddata: nothing to execute",
@@ -1377,7 +1396,9 @@ def emit_python(
         f"SOURCE = {source_name!r}",
         f"DUMP_ROM = ({DUMP_ROM_START:#06x}, {DUMP_ROM_END:#06x})",
         "",
-        "#: Ranges that no dump covers.  Code below 0x8000 is decompiler guesswork.",
+        "#: Ranges no dump record covers.  In this file (record addresses) code",
+        "#: below 0x8000 is decompiler guesswork; on the chip the undumped region",
+        "#: is the upper half of CPU space, which the file has no records for.",
         f"MISSING_RANGES = {missing_ranges(facts.covered)!r}",
         "",
         "#: Call targets outside every dump: name -> (address or None, call count)",

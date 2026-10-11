@@ -7,12 +7,17 @@
  * What this is
  * ------------
  * Ghidra decompiled the 27C512 EPROM image firmware/nm27c512n.hex.
- * That image only covers 0x8000..0xFFFF of the 64 KiB code space, so:
+ * Its Intel-HEX records sit at programmer offsets 0x8000..0xFFFF,
+ * and the addresses below are RECORD addresses (Ghidra's load base).
+ * On the real chip the same bytes are CPU 0x0000..0x7FFF (record =
+ * CPU + 0x8000; record 0x8000 is the reset vector LJMP 0x0A06), so:
  *
  *   0x8000..0xFFFF  real code - the bytes exist and were disassembled
- *   0x0000..0x7FFF  NOT dumped.  Anything printed for that range is
- *                   decompiler guesswork; such calls are marked
- *                   _external and their bodies are placeholders.
+ *   0x0000..0x7FFF  no record of the file lives there.  Anything
+ *                   printed for that range is decompiler guesswork;
+ *                   such calls are marked _external and their bodies
+ *                   are placeholders.  (The chip region this dump
+ *                   really lacks is CPU 0x8000..0xFFFF.)
  *
  * functions in the dump   : 128
  * real (non-stub) bodies  : 57
@@ -15807,10 +15812,12 @@ halt_baddata();
 }
 
 /* ---- routines outside every dump ------------------------------------
- * The decompiler resolved these call targets to addresses that
- * firmware/nm27c512n.hex does NOT cover (that image starts at 0x8000).
- * They live in the other half of the firmware.  Stubbed here so the
- * file type-checks; the bodies are NOT real and must not be trusted.
+ * The decompiler resolved these call targets to record addresses
+ * that firmware/nm27c512n.hex does NOT contain (its records start
+ * at 0x8000).  No byte of this file stands behind them - on the
+ * chip they were part of the code this dump never read.  Stubbed
+ * here so the file type-checks; the bodies are NOT real and must
+ * not be trusted.
  */
 
 /* was decimal_adjust: not defined anywhere in the dump (calls: 21) */

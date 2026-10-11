@@ -769,10 +769,22 @@ class TestRealDumpScale(unittest.TestCase):
 class TestRealHexRunner(unittest.TestCase):
     """Оригинальный hex на ядре m8051 (recover/realrun.py) - без интерпретатора.
 
-    Здесь проверяется не псевдокод, а настоящие байты ``firmware/nm27c512n.hex``:
-    реальный ISR развёртки 0x8135 и реальный мультиплексор дисплея 0x82D9,
-    маршрутизация MOVX через доказательные окна HAL, чтение страницы клавиатуры
-    0x91 самой прошивкой и честный диагноз того, чего в дампе нет.
+    Здесь проверяется не псевдокод, а настоящие байты ``firmware/nm27c512n.hex``
+    в их реальном виде: файл хранит образ по record-адресам ``0x8000..0xFFFF``,
+    а исполняется он по CPU-адресам ``0x0000..0x7FFF`` (record - 0x8000).
+    Прогон идёт из настоящего вектора сброса (``cpu.pc = 0`` -> ``LJMP 0x0A06``),
+    таймеры и прерывания ставит сама прошивка:
+
+    * Timer-0 реально работает: вектор CPU ``0x000B`` -> тело мукса CPU
+      ``0x02D9``, индикатор оживает сам (замерено: первый непустой экран на
+      ~290 000 циклов - прошивка сама инициализируется);
+    * Timer-1 прошивка в этом состоянии НЕ запускает (``TR1`` ставит только
+      код по CPU ``0x5AEC``), поэтому refresh CPU ``0x0135`` и чтения
+      страницы ``0x91`` честно равны нулю - мы не изобретаем вокруг них
+      синтетику;
+    * маршрутизация MOVX идёт через доказательные окна HAL, чтение страницы
+      клавиатуры ``0x91`` матрицей работает, а верхняя половина CPU
+      ``0x8000..0xFFFF`` в дампе отсутствует и даёт честную остановку.
     """
 
     @classmethod
@@ -783,10 +795,35 @@ class TestRealHexRunner(unittest.TestCase):
         cls.rom = load_rom()
         cls.program = _load()
 
-    def _fresh(self):
-        hal = self.CashRegisterHAL(rom=self.rom, strict=True)
+    def _fresh(self, wiring=None):
+        board = None
+        if wiring:
+            from board.cashboard import CashRegisterBoard
+            board = CashRegisterBoard(wiring=wiring)
+        hal = self.CashRegisterHAL(board=board, rom=self.rom, strict=True)
         from recover.realrun import RealRunner
         return RealRunner(hal=hal, rom=self.rom)
+
+    def test_rebased_rom_boots_from_the_real_reset_vector(self):
+        """Перебазирование: record 0x8000..0xFFFF становится CPU 0x0000..0x7FFF."""
+        runner = self._fresh()
+        # record-мир (псевдокод) не тронут - грузится как есть
+        self.assertEqual(self.rom.coverage(), (0x8000, 0xFFFF))
+        # исполняемая копия: вектор сброса лежит по CPU 0x0000 и указывает внутрь
+        self.assertEqual(runner.rom.byte(0x0000), 0x02, "LJMP у вектора сброса")
+        self.assertEqual(runner.rom.word(0x0001), 0x0A06)
+        self.assertEqual(runner.rom.coverage(), (0x0000, 0x7FFF))
+        self.assertFalse(runner.rom.is_mapped(0x8000),
+                         "верхняя половина CPU в дамп не входит")
+        self.assertEqual(runner.cpu.pc, 0x0000, "старт именно из вектора")
+        # честная остановка: переход в несdumpанную верхнюю половину
+        runner.cpu.pc = 0x8000
+        runner.cpu.step()
+        self.assertTrue(runner.cpu.halted, "верхняя половина должна останавливать")
+        self.assertIn("missing", runner.cpu.error or "")
+        runner.advance(1_000)
+        self.assertTrue(runner.halted)
+        self.assertIn("0x8000", runner.halt_reason)
 
     def test_real_hex_runs_half_a_million_cycles_without_errors(self):
         runner = self._fresh()
@@ -794,19 +831,31 @@ class TestRealHexRunner(unittest.TestCase):
         self.assertFalse(runner.halted, runner.halt_reason)
         self.assertEqual(runner.bus.gaps, [], "шина не должна ловить пробелы")
         stats = runner.stats()
-        self.assertGreaterEqual(stats["timer1_calls"], 500, stats)
-        self.assertGreaterEqual(stats["timer0_calls"], 200, stats)
+        # настоящий Timer-0: вектор 0x000B -> тело мукса CPU 0x02D9
+        # (замерено на этой прошивке: ~115 исполнений за 500k циклов)
+        self.assertGreaterEqual(stats["timer0_calls"], 100, stats)
+        self.assertEqual(stats["mux_calls"], stats["timer0_calls"])
+        # честный ноль: прошивка не запускает Timer-1, refresh не исполняется
+        self.assertEqual(stats["timer1_calls"], 0, stats)
+        self.assertEqual(stats["vector_dispatches"].get("0xb"),
+                         stats["timer0_calls"], "каждому телу - свой вектор")
+        self.assertNotIn("0x1b", stats["vector_dispatches"], stats)
         self.assertGreater(stats["instructions"], 10_000, stats)
-        self.assertEqual(stats["overruns"], 0, "тела ISR обязаны возвращаться")
-        # реальные страницы: принтер/сегменты/сетка/цифры
-        self.assertTrue({0x81, 0x82, 0xA1, 0xA2} & set(stats["write_pages"]), stats)
+        self.assertEqual(stats["overruns"], 0, "синтетических тел больше нет")
+        # реальные страницы: сегменты дисплея, сетка, шагатели платы
+        self.assertTrue({0x82, 0x92, 0xA2, 0xB1} <= set(stats["write_pages"]),
+                        stats)
 
-    def test_refresh_isr_observable_in_the_display(self):
+    def test_display_comes_alive_from_real_firmware_execution(self):
+        """Индексор оживает без всякой синтетики: пишет сама прошивка."""
         runner = self._fresh()
         board = runner.board
         before = board.display.text()
+        # Замерено: ~285k циклов собственных задержек инициализации, первый
+        # непустой экран примерно на 290k; 120 x 5_000 = 600k с большим
+        # запасом.
         changed_to = None
-        for _ in range(40):                     # 40 x 5_000 = 200_000 циклов
+        for _ in range(120):
             runner.advance(5_000)
             text = board.display.text()
             if text != before:
@@ -815,23 +864,35 @@ class TestRealHexRunner(unittest.TestCase):
         stats = runner.stats()
         self.assertIsNotNone(
             changed_to,
-            "реальный ISR не изменил индикатор ни разу за 200k циклов "
+            "реальная прошивка не изменила индикатор ни разу за 600k циклов "
             f"(writes={stats['write_pages']})",
         )
+        self.assertTrue(changed_to.strip(), f"экран должен ожить: {changed_to!r}")
         self.assertGreater(stats["display_writes"], 0, "страницы дисплея не писались")
         self.assertTrue(
-            {0x82, 0x92, 0xA2} & set(stats["write_pages"]),
-            f"мультиплексор 0x82D9 не писал сегменты/сетку: {stats['write_pages']}",
+            {0x82, 0x92, 0xA2} <= set(stats["write_pages"]),
+            f"мультиплексор CPU 0x02D9 не писал сегменты/сетку: {stats['write_pages']}",
         )
+        self.assertGreater(stats["timer0_calls"], 0, "тело мукса не исполнялось")
         self.assertGreaterEqual(board.display.grid, 0, "сетка не выбиралась")
 
-    def test_keyboard_page_0x91_is_served_and_read_by_the_firmware(self):
-        runner = self._fresh()
+    def test_keyboard_page_is_served_and_key_events_reach_the_firmware(self):
+        """Страница 0x91 обслуживается, а событие клавиши доходит до ядра.
+
+        Честная граница наблюдений: в этом состоянии прошивка сканирует
+        матрицу только из Timer-1 цепочки (``MOV DPH,#91h`` сидят там же),
+        а Timer-1 она не запускает - поэтому ``keyboard_reads`` остаётся 0.
+        Дефолтный wiring INT0 по нажатию НЕ поднимает (INT0 = линия
+        отключения питания, см. board/cashboard.py WIRING); здесь импульс
+        включается явно, чтобы проверить: событие клавиши доходит до
+        настоящего вектора 0x0003 ровно один раз.
+        """
+        runner = self._fresh(wiring={"INT0_ON_KEYPRESS": True})
         bus = runner.bus
         board = runner.board
-        # 1) сама страница отдаёт матрицу: нажатая клавиша видна по активной低
         board.keyboard.press("5")
         try:
+            # 1) страница отдаёт матрицу: нажатая клавиша видна (активная low)
             pressed_row = None
             for row in range(8):
                 value = bus.ext_read(0x9130 + row)
@@ -841,12 +902,21 @@ class TestRealHexRunner(unittest.TestCase):
             self.assertIsNotNone(
                 pressed_row, "нажатая клавиша не читается страницей 0x91"
             )
-            # 2) реальный код сам читает страницу 0x91 (сканирование)
-            runner.advance(300_000)
-            self.assertGreater(
-                runner.stats()["keyboard_reads"], 0,
-                "прошивка ни разу не прочитала страницу 0x91",
+            # собственные пробные чтения выше тоже попадают в счётчик шины
+            probed_reads = bus.read_count(0x91)
+            # 2) событие клавиши реально доходит до прошивки: вектор INT0
+            runner.advance(100_000)
+            stats = runner.stats()
+            self.assertEqual(
+                stats["vector_dispatches"].get("0x3", 0), 1,
+                f"INT0-вектор должен сработать ровно один раз: {stats}",
             )
+            # 3) честное наблюдение: idle-состояние прошивки матрицу не читает
+            #    (Timer-1 не запущен, ``MOV DPH,#91h`` живёт в его цепочке) -
+            #    мы это измеряем, а не замалчиваем: за 100k циклов шина не
+            #    получила НИ ОДНОГО чтения 0x91 сверх наших собственных проб
+            self.assertEqual(stats["keyboard_reads"], probed_reads, stats)
+            self.assertEqual(stats["timer1_calls"], 0, stats)
         finally:
             board.keyboard.release("5")
         row, _value = pressed_row
@@ -855,26 +925,39 @@ class TestRealHexRunner(unittest.TestCase):
             "после отпускания колонка должна вернуться в 0xFF",
         )
 
-    def test_diagnosis_names_the_missing_consumer(self):
+    def test_diagnosis_reflects_the_rebased_truth(self):
         from recover.realrun import diagnose_consumers
 
         report = diagnose_consumers(self.program, self.rom)
-        self.assertEqual(report["reset"]["entry"], 0x0A06)
-        self.assertFalse(report["reset"]["covered"],
-                         "вектор сброса 0x0A06 заведомо вне дампа")
+        # вектор сброса указывает внутрь дампа: entry 0x0A06 = record 0x8A06
+        reset = report["reset"]
+        self.assertEqual(reset["entry"], 0x0A06)
+        self.assertTrue(reset["covered"],
+                        "после rebasing вектор сброса покрыт дампом")
+        self.assertIn("0x8A06", reset["note"])
         self.assertEqual(report["isr"]["timer1_refresh"]["in_dump"], "FUN_CODE_8135")
         buffer = report["display_buffer"]
         self.assertIn("RAM 0x50", buffer["addresses"])
         self.assertTrue(buffer["writer_functions"],
                         "в дампе есть писатели буфера дисплея")
-        self.assertEqual(
-            buffer["reachable_from_isr"], [],
-            "ни один писатель буфера не достижим из ISR - их зовёт только "
-            "недостающая половина",
+        # статически писатели недостижимы ИЗ refresh ISR (они не в цепочке
+        # 0x001B) - это правда графа вызовов, но она больше не означает
+        # "производителя нет": main loop от вектора сброса работает
+        self.assertEqual(buffer["reachable_from_isr"], [])
+        self.assertNotIn("PRODUCER MISSING", buffer["verdict"])
+        self.assertIn("producers RUN", buffer["verdict"])
+        self.assertIn("0x0A06", buffer["verdict"])
+        self.assertEqual(report["scanner"]["callers_in_dump"], [])
+        # динамическая проверка вердикта: запускаем реальный образ и смотрим,
+        # что main loop реально заполняет буфер индикатора RAM 0x50..0x5F
+        runner = self._fresh()
+        runner.advance(400_000)
+        self.assertFalse(runner.halted, runner.halt_reason)
+        self.assertGreater(runner.stats()["timer0_calls"], 0, "мукс не запущен")
+        self.assertTrue(
+            any(byte != 0 for byte in runner.cpu.ram[0x50:0x60]),
+            "main loop обязан заполнить буфер индикатора RAM 0x50..0x5F",
         )
-        self.assertIn("PRODUCER MISSING", buffer["verdict"])
-        self.assertEqual(report["scanner"]["callers_in_dump"], [],
-                         "сканер 0x822C без вызовов внутри дампа")
 
     def test_session_defaults_to_real_hex_instead_of_demo(self):
         from recover.session import RecoveredFirmwareSession
@@ -887,13 +970,22 @@ class TestRealHexRunner(unittest.TestCase):
             self.assertEqual(status["source"], "recovered",
                              "GUI-путь обязан исполнять реальный hex, а не demo")
             self.assertTrue(status["real_hex"])
+            self.assertEqual(status["entry"], "0x0A06")
+            self.assertTrue(status["entry_covered"],
+                            "вектор сброса 0x0A06 покрыт дампом (record 0x8A06)")
             self.assertFalse(session.demo_enabled,
                              "demo доступен только по явному флагу")
-            session.run(100_000)
+            session.run(500_000)
             status = session.status()
-            self.assertGreater(status["isr_calls"], 0, "ISR не вызывался")
-            self.assertGreater(status["mux_calls"], 0, "мультиплексор не вызывался")
+            self.assertGreater(status["mux_calls"], 0,
+                               "тело мукса (Timer-0) не вызывалось")
+            self.assertEqual(status["isr_calls"], 0,
+                             "Timer-1 прошивка не запускает - честный ноль")
+            self.assertGreater(status["steps"], 0, "шаги должны идти")
+            self.assertGreater(status["cpu_instructions"], 0)
             self.assertTrue(status["consumer"], "диагноз потребителя обязан быть")
+            self.assertTrue(status["display"].strip(),
+                            "экран обязан ожить от настоящего исполнения")
         finally:
             try:
                 session.reset()

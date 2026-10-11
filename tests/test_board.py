@@ -702,12 +702,20 @@ class BoardRoutingTests(unittest.TestCase):
         b.keyboard.release("1")
 
     def test_int0_requested_on_key_event_and_expires(self):
+        # Дефолтный wiring INT0 по нажатию НЕ поднимает (INT0 = линия питания,
+        # см. WIRING): событие есть, импульса нет.
         b = CashRegisterBoard()
-        self.assertEqual(b.irq_requested() & IRQ_INT0, 0)
         b.keyboard.tap("9")
-        self.assertEqual(b.irq_requested() & IRQ_INT0, IRQ_INT0)
-        b.tick(int(WIRING["INT0_HOLD_CYCLES"]) + 1)
-        self.assertEqual(b.irq_requested() & IRQ_INT0, 0)
+        self.assertEqual(b.irq_requested() & IRQ_INT0, 0,
+                         "дефолт: INT0 не имитирует выключение по клавише")
+        # Механизм импульса жив и включается явным wiring (на нём стоят
+        # тесты EA-гейтинга ниже).
+        b2 = CashRegisterBoard(wiring={"INT0_ON_KEYPRESS": True})
+        self.assertEqual(b2.irq_requested() & IRQ_INT0, 0)
+        b2.keyboard.tap("9")
+        self.assertEqual(b2.irq_requested() & IRQ_INT0, IRQ_INT0)
+        b2.tick(int(WIRING["INT0_HOLD_CYCLES"]) + 1)
+        self.assertEqual(b2.irq_requested() & IRQ_INT0, 0)
 
     def test_tick_advances_and_status_reports(self):
         b = CashRegisterBoard()
@@ -1010,8 +1018,10 @@ class IntegrationTests(unittest.TestCase):
 class InterruptGatingTests(unittest.TestCase):
     """EA-гейтинг ядра (m8051/cpu.py) x INT0 платы.
 
-    Плата поднимает INT0 на событии клавиатуры (WIRING["INT0_ON_KEYPRESS"]),
-    но ядро поллит ``bus.irq_requested()`` только при IE.7=1 и принимает
+    Плата умеет поднять INT0 на событии клавиатуры, но дефолтный wiring этого
+    не делает (INT0 = линия отключения питания, см. WIRING) - тесты включают
+    `wiring={"INT0_ON_KEYPRESS": True}` явно, чтобы проверить саму разводку:
+    ядро поллит ``bus.irq_requested()`` только при IE.7=1 и принимает
     источник только при IE.0=1. Регрессионная страховка после введения
     EA-гейтинга в run/run_steps: ISR обязан просыпаться при EA+EX0 и
     обязан НЕ просыпаться, когда хоть один бит не выставлен.
@@ -1034,7 +1044,7 @@ class InterruptGatingTests(unittest.TestCase):
         return bytes(img)
 
     def _run_with_key(self, ie_value: int):
-        board = CashRegisterBoard()
+        board = CashRegisterBoard(wiring={"INT0_ON_KEYPRESS": True})
         rom = ROM("ea-gate")
         rom.load_block(0x0000, self._image(ie_value))
         cpu = CPU8051(rom, board)

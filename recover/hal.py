@@ -1271,7 +1271,22 @@ class CashRegisterHAL:
 
 
 def load_rom(path_candidates: Sequence[str] = ROM_CANDIDATES):
-    """Best-effort Intel-HEX load of the firmware image (``None`` on failure)."""
+    """Best-effort Intel-HEX load of the firmware image (``None`` on failure).
+
+    **Record space, by design.**  ``firmware/nm27c512n.hex`` stores the 32 KiB
+    image at record addresses ``0x8000..0xFFFF`` - Ghidra's load address, the
+    space every ``FUN_CODE_xxxx`` label and every prose cite ("ROM 0x8135")
+    uses, and the space this pseudo-code world (MOVC gates, the 7-segment
+    font at record ``0x9EBA``, the XDATA evidence strings) is built around.
+    The bytes are *really* CPU addresses ``0x0000..0x7FFF`` (record minus
+    ``0x8000``: record ``0x8000`` is the reset vector ``LJMP 0x0A06``, and
+    CPU ``0x0000`` is where an 8051 boots).  The single translation point
+    lives in :func:`recover.realrun._cpu_space_rom`, where
+    :class:`~recover.realrun.RealRunner` builds its own rebased copy for
+    execution; this loader deliberately does **not** shift anything, and
+    MOVX/XDATA windows (``0x81xx``/``0x91xx``/``0xA1xx`` ...) are external
+    addresses that are never rebased anywhere.
+    """
     try:
         from m8051.rom import load_intel_hex
     except Exception:

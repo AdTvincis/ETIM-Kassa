@@ -662,7 +662,9 @@ class TestRecoveredBackendSmoke(unittest.TestCase):
     def test_status_never_lies_about_the_screen(self):
         """Бут без ошибок + статус говорит ровно то, что показывает экран."""
         backend = m.make_backend("recovered", _args())
-        for _ in range(6):
+        # Настоящая прошивка проходит детерминированные delay-петли инициации
+        # (~285k циклов) до первого непустого экрана: 20 x 20k = 400k с запасом.
+        for _ in range(20):
             backend.run_budget(20_000)
         status = backend.status()
         self.assertEqual(status["boot_error"], "",

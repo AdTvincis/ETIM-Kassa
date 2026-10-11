@@ -6,7 +6,8 @@ reasons:
 * recovered code contains ``goto`` into the middle of other functions;
 * the decompiler's variable set is dynamic (``uVar7`` may be a byte in one
   function and a pointer in another);
-* when execution needs the half of the firmware that was never dumped, the
+* when execution needs code the dump has no bytes for (addresses below record
+  ``0x8000`` - decompiler guesswork), the
   interpreter can raise :class:`~recover.errors.MissingFirmware` with the exact
   address instead of quietly computing nonsense.
 
