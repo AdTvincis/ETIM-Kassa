@@ -104,9 +104,9 @@ python -m unittest tests.test_ui_headless   # один файл
 `test_board`, `test_recover`, `test_demo_firmware`, `test_integration`,
 `test_perf`, `test_ui_headless`.
 
-> **Статус: 421 тест — все зелёные.** Контрольный прогон:
-> `python -m unittest discover -s tests -q` → `Ran 421 tests in 296.2s`,
-> `OK` (0 падений, 0 ошибок, `0 skipped`). Skip-guard'ы известных пробелов
+> **Статус: 426 тестов — все зелёные.** Контрольный прогон:
+> `python -m unittest discover -s tests -q` → `Ran 426 tests …, OK`
+> (0 падений, 0 ошибок). Skip-guard'ы известных пробелов
 > задокументированы в самих тестах (`test_cpu_conformance`, `test_opcodes`,
 > `test_perf`): условные пропуски, которые срабатывают только при
 > обнаружении известного расхождения.
@@ -115,6 +115,7 @@ python -m unittest tests.test_ui_headless   # один файл
 
 | Документ | Содержание |
 | --- | --- |
+| [docs/РУКОВОДСТВО.md](docs/РУКОВОДСТВО.md) | **полное руководство по эксплуатации**: запуск, окно, клавиатура, типовая продажа, режимы, неполадки (работает без интернета) |
 | [docs/usage.md](docs/usage.md) | руководство пользователя: GUI, CLI, тесты, интерпретация вывода |
 | [docs/architecture.md](docs/architecture.md) | архитектура, режимы запуска, контракт `HardwareBus`, требования к UI |
 | [docs/board_contract.md](docs/board_contract.md) | протокол «плата → интерфейс»: `display`, `keyboard`, `printer` |
