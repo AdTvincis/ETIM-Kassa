@@ -3,8 +3,9 @@
 
 Запускает эмуляцию кассы и интерфейс Tkinter:
 
-    python main.py                       # восстановленный код (recover/)
-    python main.py --backend demo51      # демонстрационная 8051-программа
+    python main.py                       # GUI: рабочая касса (demo51, кнопки
+                                         #   -> индикатор -> чек, по умолчанию)
+    python main.py --backend recovered   # настоящая прошивка ETIM: бут + самотест
     python main.py --list                # что вообще доступно
     python main.py --selftest            # без окна: проверить, что всё грузится
 
@@ -393,8 +394,10 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     parser.add_argument(
-        "--backend", "-b", choices=BACKENDS, default="recovered",
-        help="что запускать (по умолчанию: восстановленный код)",
+        "--backend", "-b", choices=BACKENDS, default="demo51",
+        help="что запускать (по умолчанию: demo51 — рабочие кнопки/чек; "
+             "recovered — настоящая прошивка ETIM, но её клавиатурный цикл "
+             "ещё не восстановлен, см. docs/usage.md §4.3)",
     )
     parser.add_argument("--dump", default=None, help="путь к .c-дампу декомпиляции")
     parser.add_argument("--self-test", action="store_true",
