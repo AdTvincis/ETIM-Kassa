@@ -590,7 +590,11 @@ class ScreenWidget(tk.Frame):
         y0 = self.cell_h
         matrix = state
         colour = theme.COLORS["screen_on"]
-        lit = "#*.●□"
+        # '.' — ТЁМНАЯ точка (конвенция проекта: render_rows отдаёт '#'/'.'), и
+        # раньше она ошибочно входила в набор: ch in lit было истинно для
+        # каждой точки => на канве рисовались ВСЕ 280 пикселей и экран выглядел
+        # «целиком заряженным», без различимых цифр.  Горят только '#', '*', '●', '□'.
+        lit = "#*●□"
         # matrix: lines * CELL_H строк, по columns * CELL_W точек в каждой.
         cell_w = self.cell_w
         cell_h = self.cell_h

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import time
 import tkinter as tk
 
 from . import theme
@@ -59,6 +60,8 @@ class CashRegisterApp:
         #: последний показанный текст индикатора: при неизменённом тексте
         #: refresh() пропускает тяжёлый путь (render_rows + пересборка матрицы)
         self._last_display_text = None
+        #: время последнего принудительного полного прохода (см. refresh())
+        self._last_force_ts = 0.0
         #: True, если пользователь сам выбрал индикатор в списке режимов.
         self._manual_mode = False
 
@@ -456,8 +459,21 @@ class CashRegisterApp:
         # (render_rows + пересборка матрицы) не запускаем - рисуем только при
         # реальном изменении содержимого.  text is None (нет объекта/ошибка
         # платы) всегда идёт полным путём, чтобы ошибки не «залипали».
+        #
+        # Раз в ~2 с (по часам — независимо от частоты тиков) полный проход
+        # выполняется ПРИНУДИТЕЛЬНО: гонка «текст прочитан одним снимком, а
+        # render_rows успел поймать транзиент платы (все-восьмёрки при буте)»
+        # раньше залипала навсегда — экран горел целиком и не обновлялся,
+        # хотя кэш текста считал состояние неизменным.  Периодический сброс
+        # гарантирует самовосстановление картинки не позднее ~2 с.
+        now = time.monotonic()
+        force = (now - self._last_force_ts) >= 2.0
+        if force:
+            self._last_force_ts = now
         text = self._peek_display_text()
-        unchanged = text is not None and text == self._last_display_text
+        unchanged = (
+            not force and text is not None and text == self._last_display_text
+        )
         fatal = None
         try:
             ok, last_error = (
@@ -476,11 +492,16 @@ class CashRegisterApp:
                 self.screen.set_text("\u041e\u0428\u0418\u0411\u041a\u0410 \u042d\u041a\u0420\u0410\u041d\u0410")
             except Exception:
                 pass
-        # содержимое показано - кэшируем его текст; при ошибке платы кэш
-        # сбрасываем, чтобы следующий refresh снова прошёл полным путём
-        # и заменил «ОШИБКА ЭКРАНА» живым экраном
+        # содержимое показано - кэшируем его текст, но ТОЛЬКО если текст не
+        # изменился во время тяжёлого прохода: нарисованное в гонке могло
+        # относиться к другому состоянию платы (транзиент бута), и кэш
+        # «неизменного» текста тогда залипал бы с горящим экраном навсегда.
+        # Иначе кэш = None, и следующий тик пройдёт полным путём заново.
+        # При ошибке платы кэш тоже сбрасываем, чтобы «ОШИБКА ЭКРАНА»
+        # не залипла.
+        t_after = self._peek_display_text()
         self._last_display_text = (
-            self._peek_display_text() if fatal is None else None
+            t_after if fatal is None and t_after == text else None
         )
         try:
             self.receipt.update_from_printer(self.printer)

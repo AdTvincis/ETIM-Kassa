@@ -264,6 +264,9 @@ class TestAppWithMockBoard(unittest.TestCase):
         # отображённым виджетам и только окну, которое реально имеет фокус
         # ввода. В одном процессе Tk-окон создаётся много (по одному на тест),
         # поэтому каждый раз явно прогоняем геометрию и забираем фокус.
+        # Позиция — полностью за экраном (заказ: тесты не показывают окон),
+        # при этом окно остаётся mapped для event_generate/deiconify.
+        self.app.root.geometry("+-30000+-30000")
         self.app.root.deiconify()
         self.app.root.update()
         self.app.root.focus_force()
@@ -285,6 +288,32 @@ class TestAppWithMockBoard(unittest.TestCase):
         for _ in range(5):
             self.app.refresh()
         self.assertGreater(self.app._counter, 0)
+
+    def test_stale_screen_heals_via_forced_refresh(self):
+        """Регрессия: «залипшая» горящая матрица обязана замениться снимком.
+
+        Гонка «текст прочитан одним снимком, а render_rows поймал транзиент
+        платы» раньше залипала навсегда при совпадении кэша текста: refresh()
+        считал состояние неизменным и не перерисовывал.  Принудительный полный
+        проход (раз в ~2 с, см. ui/app.py::refresh) обязан заменить старую
+        картинку снимком с платы.
+        """
+        app = self.app
+        cols = app.screen.columns * ui_screen.CELL_W
+        rows_n = app.screen.lines * ui_screen.CELL_H
+        poison = ["#" * cols] * rows_n
+        app.screen.set_rows(poison)
+        # кэш говорит «текст не менялся» — как в баге
+        app._last_display_text = app._peek_display_text()
+        # порог принудительного прохода уже истёк
+        app._last_force_ts = 0.0
+        app.refresh()
+        matrix = app.screen._matrix()
+        self.assertNotEqual(
+            matrix, poison,
+            "залипшая матрица не заменена снимком платы принудительным проходом",
+        )
+        self.assertEqual(len(matrix), rows_n)
 
     def test_window_has_required_parts(self):
         for attr in ("screen", "keypad", "receipt", "status_var", "root"):
@@ -890,6 +919,33 @@ class TestScreenEightCells(_TkFixture):
                            "нет зажжённых точек")
         self.assertGreater(fills.get(ui_theme.COLORS["screen_dim"].lower(), 0), 0,
                            "нет погашенной сетки")
+
+    def test_dark_pixels_are_never_drawn_lit(self):
+        """Регрессия: тёмная точка '.' не должна входить в набор «горящих».
+
+        Симптом бага: `lit = "#*.●□"` содержал ASCII-точку, поэтому
+        `ch in lit` был истинен для каждой тёмной точки — redraw() зажигал
+        ВСЕ пиксели (8x35 = 280) и экран выглядел «целиком заряженным»,
+        без различимых цифр, независимо от содержимого индикатора.
+        """
+        self.screen.set_text("0    000")
+        self.root.update_idletasks()
+        self.root.update()
+        matrix = self.screen._matrix()
+        want_lit = sum(str(row).count("#") for row in matrix)
+        self.assertGreater(want_lit, 0, "тест должен иметь зажжённые точки")
+        total = self.screen.lines * ui_screen.CELL_H * self.screen.columns * ui_screen.CELL_W
+        self.assertLess(want_lit, total, "матрица не должна быть целиком зажжённой")
+        on = 0
+        for item in self.screen.canvas.find_all():
+            if str(self.screen.canvas.itemcget(item, "fill")).lower() == \
+                    ui_theme.COLORS["screen_on"].lower():
+                on += 1
+        self.assertEqual(
+            on, want_lit,
+            "на канве %d горящих прямоугольников при %d зажжённых точках матрицы"
+            % (on, want_lit),
+        )
 
     def test_matrix_fills_canvas_without_dead_strip(self):
         """Точки занимают всю канву: иначе справа остаётся мёртвая полоса.
