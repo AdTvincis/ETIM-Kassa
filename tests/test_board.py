@@ -658,11 +658,35 @@ class BoardRoutingTests(unittest.TestCase):
         self.assertEqual(b.display.grid, 1)
 
     def test_native_keyboard_read_uses_the_row_in_the_address(self):
+        # Колонки матрицы стробируются линией выбора знакоместа (0xA2):
+        # включаем валидное знакоместо, как это делает развёртка прошивки.
+        self.b.ext_write(0xA200, 3)
         row = self.b.keyboard.row_of("X")
+        col = self.b.keyboard.col_of("X")
+        # Сканирующее чтение 0x9130+row — активная-ВЫСОКАЯ маска «где
+        # нажато» (покой 0x00, нажатие = бит колонки): этого требует сама
+        # прошивка — её ворота постановки в кольцо (0x03AB-0x03C1) при
+        # активном-LOW не проходят никогда (слоты 0x38..0x3D не набиваются
+        # в 0xFF), проверено трассировкой настоящих байтов.
+        self.assertEqual(self.b.ext_read(0x9130 + row), 0x00,
+                         "покой строки даёт 0x00")
         self.b.keyboard.press("X")
         got = self.b.ext_read(0x9130 + row)
-        self.assertEqual(got, (~(1 << self.b.keyboard.col_of("X"))) & 0xFF)
-        self.assertEqual(self.b.ext_read(0x9100 + ((row + 1) % 8)), 0xFF)
+        self.assertEqual(got, 1 << col)
+        # Вне диапазона знакомест (сетка 8..13) колонки не строятся:
+        # строка читается нулём — на этом пути бут ставит сервисные флаги.
+        self.b.ext_write(0xA200, 9)
+        self.assertEqual(self.b.ext_read(0x9130 + row), 0x00,
+                         "вне диапазона знакомест колонки не стробятся")
+        self.b.ext_write(0xA200, 3)
+        # Адрес прескана (0x9100+i) — контракт САМОЙ прошивки (проверено
+        # бутом настоящих байтов): «0 = в строке нет нажатых, !=0 = есть
+        # контакт».  При пустой клавиатуре бут обязан получить 0x00, иначе
+        # после самотеста прошивка уходит в спец-режим и паркуется в 0x1F60.
+        self.assertNotEqual(self.b.ext_read(0x9100 + row) & (1 << col), 0,
+                            "нажатая строка на адресе прескана обязана дать !=0")
+        self.assertEqual(self.b.ext_read(0x9100 + ((row + 1) % 8)), 0x00,
+                         "пустая строка на адресе прескана даёт 0x00")
 
     def test_native_printer_strobe_on_p34(self):
         b = CashRegisterBoard()
@@ -851,10 +875,13 @@ class BoardRoutingTests(unittest.TestCase):
     def test_keyboard_row_address_above_seven_is_masked(self):
         """Младший байт адреса «BCD 10» (0x3A) маскируется в строку 0..7."""
         b = CashRegisterBoard()
+        # Колонки стробируются линией выбора знакоместа — включаем валидное.
+        b.ext_write(0xA200, 3)
         self.assertEqual(b.ext_read(0x913A), b.ext_read(0x9132))
         b.keyboard.press("1")                    # строка 2, колонка 0
-        self.assertEqual(b.ext_read(0x913A), (~(1 << 0)) & 0xFF)
+        self.assertEqual(b.ext_read(0x913A), 1 << 0)
         b.keyboard.release("1")
+        self.assertEqual(b.ext_read(0x913A), 0x00)
 
     def test_empty_firmware_streams_leave_the_board_quiet(self):
         b = CashRegisterBoard()
@@ -1102,12 +1129,13 @@ class ThreadSafetyTests(unittest.TestCase):
 
     def test_tap_survives_until_the_firmware_polls(self):
         board = CashRegisterBoard()
+        board.ext_write(0xA200, 3)   # валидное знакоместо: колонки строятся
         board.keyboard.tap("5")
         row = board.keyboard.row_of("5")
         col = board.keyboard.col_of("5")
-        self.assertEqual(board.ext_read(0x9130 + row), (~(1 << col)) & 0xFF)
+        self.assertEqual(board.ext_read(0x9130 + row), 1 << col)
         board.tick(board.keyboard.tap_cycles + 1)
-        self.assertEqual(board.ext_read(0x9130 + row), 0xFF)
+        self.assertEqual(board.ext_read(0x9130 + row), 0x00)
 
 
 if __name__ == "__main__":

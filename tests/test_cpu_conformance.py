@@ -932,7 +932,9 @@ class TestStackAndCalls(unittest.TestCase):
         rom.load_block(0x0010, b"\x32")                # RETI
         cpu = CPU8051(rom, NullBus())
         cpu.sfr[SFR_IE] = 0x81                         # EA | EX0
-        cpu.sfr[SFR_TCON] = 0x02                       # IE0
+        cpu.sfr[SFR_TCON] = 0x03                       # IE0 | IT0 (режим границы:
+        # в режиме уровня IT0=0 программный IE0 не источник прерываний —
+        # флагом владеет железо, см. m8051/cpu.py::_poll_interrupts)
         cpu.step()                                     # вход в обработчик + LJMP
         self.assertEqual(cpu.pc, 0x0010)
         self.assertEqual(cpu.sp, 0x09, "адрес возврата в стеке")

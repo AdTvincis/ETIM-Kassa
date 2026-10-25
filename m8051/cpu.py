@@ -553,6 +553,24 @@ class CPU8051:
             return
         pending = 0
         tcon = self.sfr[SFR_TCON]
+        irq_line = None
+        if not (tcon & TCON_IT0):
+            # Режим уровня (IT0 = 0): на настоящем кремнии непрерывное
+            # сэмплирование линии INT0 владеет флагом IE0 — программный
+            # SETB TCON.1 НЕ создаёт прерывания (пин в покое высокий, флаг
+            # сбрасывается сэмплом).  Прошивка ETIM полагается на это:
+            # её «ввод-вывод» (LCALL 0x50E3) ставит IE0 пометкой и ждёт
+            # продолжения, а обработчик 0x04D1 (выключение кассы) по этому
+            # флагу в нормальном буте вызываться не должен — раньше ядро
+            # диспатчило такой SETB и касса «выключалась» сразу после
+            # самотеста.  Линию опрашиваем здесь же (один вызов на опрос:
+            # one-shot платы потребляется ровно один раз).
+            irq_line = self.bus.irq_requested()
+            if irq_line & IRQ_INT0:
+                tcon |= TCON_IE0
+            else:
+                tcon &= ~TCON_IE0
+            self.sfr[SFR_TCON] = tcon
         if tcon & TCON_IE0:
             pending |= IRQ_INT0
         if tcon & TCON_TF0:
@@ -565,7 +583,11 @@ class CPU8051:
             pending |= IRQ_RX
         if self.sfr[SFR_SCON] & SCON_TI:
             pending |= IRQ_TX
-        pending |= self.bus.irq_requested()
+        if irq_line is None:
+            # режим границы (IT0 = 1): флаг IE0 остаётся программным
+            # (классический software-interrupt), линию опрашиваем как раньше
+            irq_line = self.bus.irq_requested()
+        pending |= irq_line
         pending &= 0xFF
         if not pending:
             return

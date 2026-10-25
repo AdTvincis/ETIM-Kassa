@@ -220,6 +220,26 @@ class Keyboard:
         cache[row] = value
         return value
 
+    def row_pressed_mask(self, row: int) -> int:
+        """Битовая маска «где в строке ``row`` зажаты клавиши» (бит = колонка).
+
+        Нужна прескану бута настоящей прошивки (чтение ``0x9100+i``):
+        ``0`` = в строке пусто, ``!=0`` = есть контакт.  Пустая клавиатура
+        обязана вернуть ``0x00`` — иначе прошивка после самотеста уходит в
+        спец-режим и паркуется (см. docs/usage.md).
+        """
+        if row < 0 or row >= self.rows:
+            return 0
+        bits = 0
+        names = self._row_names[row]
+        with self._lock:
+            pressed = self._pressed
+            loose = self._loose
+            for c, name in enumerate(names):
+                if name and (pressed.get(name) or loose.get(name, False)):
+                    bits |= 1 << c
+        return bits
+
     def row_bits(self) -> int:
         """Bitmap of rows that currently have at least one key down."""
         bits = 0

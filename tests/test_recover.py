@@ -879,24 +879,32 @@ class TestRealHexRunner(unittest.TestCase):
     def test_keyboard_page_is_served_and_key_events_reach_the_firmware(self):
         """Страница 0x91 обслуживается, а событие клавиши доходит до ядра.
 
-        Честная граница наблюдений: в этом состоянии прошивка сканирует
-        матрицу только из Timer-1 цепочки (``MOV DPH,#91h`` сидят там же),
-        а Timer-1 она не запускает - поэтому ``keyboard_reads`` остаётся 0.
+        Честная граница наблюдений: в состоянии «самотест не пройден»
+        (дефолтная проводка ППИ) прошивка стоит в своей ветке ошибки и
+        матрицу не сканирует - поэтому ``keyboard_reads`` остаётся 0.
         Дефолтный wiring INT0 по нажатию НЕ поднимает (INT0 = линия
         отключения питания, см. board/cashboard.py WIRING); здесь импульс
         включается явно, чтобы проверить: событие клавиши доходит до
         настоящего вектора 0x0003 ровно один раз.
+
+        Семантика страницы 0x91 — активная-ВЫСОКАЯ маска нажатий, а
+        колонки стробируются линией выбора знакоместа (0xA2): без валидного
+        знакоместа строка честно читается нулём.  Оба факта доказаны
+        разбором настоящих байтов (см. docs/usage.md §4.3).
         """
         runner = self._fresh(wiring={"INT0_ON_KEYPRESS": True})
         bus = runner.bus
         board = runner.board
+        # валидное знакоместо — иначе колонки не стробятся
+        bus.ext_write(0xA200, 3)
         board.keyboard.press("5")
         try:
-            # 1) страница отдаёт матрицу: нажатая клавиша видна (активная low)
+            # 1) страница отдаёт матрицу: нажатая клавиша видна (активная
+            #    высокая маска: покой 0x00, нажатие = бит колонки)
             pressed_row = None
             for row in range(8):
                 value = bus.ext_read(0x9130 + row)
-                if value != 0xFF:
+                if value != 0x00:
                     pressed_row = (row, value)
                     break
             self.assertIsNotNone(
@@ -912,17 +920,17 @@ class TestRealHexRunner(unittest.TestCase):
                 f"INT0-вектор должен сработать ровно один раз: {stats}",
             )
             # 3) честное наблюдение: idle-состояние прошивки матрицу не читает
-            #    (Timer-1 не запущен, ``MOV DPH,#91h`` живёт в его цепочке) -
-            #    мы это измеряем, а не замалчиваем: за 100k циклов шина не
-            #    получила НИ ОДНОГО чтения 0x91 сверх наших собственных проб
+            #    (она стоит в ветке ошибки самотеста) - мы это измеряем,
+            #    а не замалчиваем: за 100k циклов шина не получила НИ ОДНОГО
+            #    чтения 0x91 сверх наших собственных проб
             self.assertEqual(stats["keyboard_reads"], probed_reads, stats)
             self.assertEqual(stats["timer1_calls"], 0, stats)
         finally:
             board.keyboard.release("5")
         row, _value = pressed_row
         self.assertEqual(
-            bus.ext_read(0x9130 + row), 0xFF,
-            "после отпускания колонка должна вернуться в 0xFF",
+            bus.ext_read(0x9130 + row), 0x00,
+            "после отпускания строка должна вернуться в 0x00",
         )
 
     def test_diagnosis_reflects_the_rebased_truth(self):

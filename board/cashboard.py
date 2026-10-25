@@ -328,10 +328,40 @@ class CashRegisterBoard(HardwareBus):
             low = addr & 0xFF
             key_page = self.wiring["KEYBOARD_READ_PAGE"]
             if page == key_page:
-                row = (low - (int(self.wiring["KEYBOARD_READ_BASE"]) & 0xFF)) & 0xFF
-                if int(self.wiring["KEYBOARD_READ_BASE"]) >> 8 != page:
+                base = int(self.wiring["KEYBOARD_READ_BASE"])
+                if (base >> 8) == page and low < (base & 0xFF):
+                    # Прескан бута настоящей прошивки (чтение 0x9100+i,
+                    # строки 0..7): «0 = в строке нет нажатых, !=0 = есть
+                    # контакт».  Прошивка после самотеста читает это и при
+                    # пустой клавиатуре обязана получить 0x00 — иначе она
+                    # уходит в спец-режим и паркуется в 0x1F60 (проверено
+                    # трассировкой).  Ниже базы (low < 0x30) — это маска
+                    # колонок со сжатыми клавишами, а не «колонки с подтяжкой».
+                    return self.keyboard.row_pressed_mask(low)
+                row = (low - (base & 0xFF)) & 0xFF
+                if (base >> 8) != page:
                     row = low
-                return self.keyboard.read_columns(row & 0x07)
+                # Сканирующее чтение 0x9130+row — активная-ВЫСОКАЯ маска
+                # «где нажато» (покой 0x00, нажатие = бит колонки).
+                # Доказано разбором постановки кода в кольцо (0x03AB-0x03E8):
+                # прошивка делает CPL и сравнивает слоты 0x38..0x3D; при
+                # активном-LOW (покой 0xFF → сэмпл 0x00) слоты не набиваются
+                # в 0xFF и ворота «все шесть слотов == 0xFF» (0x03C1) не
+                # проходят НИКОГДА — клавиши не поступают в кольцо (проверено
+                # трассировкой).  При активной-ВЫСОКОЙ (покой 0x00 → сэмпл
+                # 0xFF) постановка срабатывает на НАЖАТИЕ — как задумано.
+                #
+                # Колонки матрицы стробируются линиями выбора знакоместа
+                # (0xA2): вне диапазона знакомест (например, 8..13) столбцы
+                # не строятся, и строка читается как «нет контакта» (0).
+                # Доказано путём ряда 7 (0x0434..0x0462): прошивка ставит
+                # 26h.3 только когда цикл по сеткам 8..13 видит нули —
+                # иначе ветка уходит в 0x042B, и сервисные флаги не
+                # выставляются никогда (проверено трассировкой).
+                grid = self.display.grid
+                if grid < 0 or grid >= self.display.columns:
+                    return 0
+                return self.keyboard.row_pressed_mask(row & 0x07)
             if page == self.wiring["DISPLAY_DIGIT_PAGE"]:
                 return self.display.lamp_readback()
             if page == self.wiring["DISPLAY_SEG0_PAGE"]:
