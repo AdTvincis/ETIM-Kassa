@@ -120,6 +120,20 @@ WIRING: Dict[str, object] = {
     "KEY_RING_HI": 0x0C9F,
     "RTC_BASE": 0x0CB0,                 # ROM 0x832B: sec/min/hour, BCD
 
+    # ------------------------------------------- field devices (HYPOTHESIS)
+    # Найдено трассировкой настоящей прошивки (tools/_diag_real_boot.py):
+    # загрузка читает два «полевых» устройства, и без их ответов прошивка
+    # уходит в ветку ожидания.  Модель включается явно через wiring — по
+    # умолчанию выключена, чтобы не менять поведение demo51/старых тестов:
+    #  * FIELD_STATUS_PAGE: последовательность чтений страницы 0x80 —
+    #    00 -> 55 -> AA (код 0x4CE0: JZ по первому чтению, затем
+    #    CJNE A,#55h / CJNE A,#AAh в 0x51E7/0x51F4);
+    #  * FIELD_ID_VALUES: статические {адрес: значение} — пара 55 AA в
+    #    XDATA 0x933E/0x933F (код 0x07D7 сверяет её в цикле загрузки).
+    "FIELD_STATUS_PAGE": None,          # None = устройство не смоделировано
+    "FIELD_STATUS_SEQUENCE": (0x00, 0x55, 0xAA),
+    "FIELD_ID_VALUES": {},              # {addr: value}; пусто = нет устройства
+
     # ------------------------------------------------------------ senses
     # C L464: cVar1 = P1_3; if (cVar1 != '\0') { ... TCON &= 0x3f; ET1 = 0; }
     "KEY_PRESENT_PORT": 1,
@@ -140,6 +154,26 @@ WIRING: Dict[str, object] = {
     "INT0_HOLD_CYCLES": 2_000,
     "EXTRA_IRQ": 0,
 }
+
+#: Проводка, с которой НАСТОЯЩАЯ прошивка проходит свой самотест ОЗУ и
+#: доходит до главного цикла (найдено трассировкой настоящих байтов,
+#: воспроизведение — ``tools/_diag_real_boot.py``):
+#:
+#: * ППИ вынесена из проверяемого диапазона ``0x0000..0x1FFF``.  Реальная
+#:   страница ППИ пока неизвестна (HYPOTHESIS ``0xF000``), но внутри
+#:   диапазона самотеста её быть не может — иначе самотест падал бы и на
+#:   настоящей машине;
+#: * включены «полевые» устройства-ответчики, без которых прошивка уходит
+#:   в ветку ожидания (страница ``0x80``: 00 -> 55 -> AA; ``0x933E/0x933F``:
+#:   пара 55 AA).
+RECOVERED_WIRING: Dict[str, object] = dict(
+    WIRING,
+    PPI_BASE=0xF000,
+    PPI_MIRROR_BASES=(),
+    FIELD_STATUS_PAGE=0x80,
+    FIELD_STATUS_SEQUENCE=(0x00, 0x55, 0xAA),
+    FIELD_ID_VALUES={0x933E: 0x55, 0x933F: 0xAA},
+)
 
 # handy named pages derived from the wiring block
 _PPI_CTRL_ALIASES = tuple(
@@ -201,6 +235,9 @@ class CashRegisterBoard(HardwareBus):
         self._ppi_a_meaning = self.wiring["PPI_A_MEANING"]
         self._ppi_b_meaning = self.wiring["PPI_B_MEANING"]
         self._grid_blank = int(self.wiring["DISPLAY_GRID_BLANK"])
+        #: индекс ответа «полевого» устройства на странице FIELD_STATUS_PAGE
+        #: (последовательность 00 -> 55 -> AA; см. WIRING/WIRING-комментарий)
+        self._field_status_index = 0
 
         self.display = display or Display(
             int(self.wiring["DISPLAY_DIGITS"]), int(self.wiring["DISPLAY_LINES"]))
@@ -372,6 +409,15 @@ class CashRegisterBoard(HardwareBus):
                 return self.print_latch
             if page == self.wiring["MOTOR_PAGE"]:
                 return self.motor
+            field_values = self.wiring.get("FIELD_ID_VALUES")
+            if field_values and addr in field_values:
+                return int(field_values[addr]) & 0xFF
+            field_page = self.wiring.get("FIELD_STATUS_PAGE")
+            if field_page is not None and page == field_page:
+                sequence = self.wiring.get("FIELD_STATUS_SEQUENCE") or (0x00,)
+                value = int(sequence[self._field_status_index % len(sequence)]) & 0xFF
+                self._field_status_index += 1
+                return value
             return self.ext.get(addr, 0xFF)
 
     def ext_probe(self, addr: int) -> bool:

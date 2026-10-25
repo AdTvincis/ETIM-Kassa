@@ -883,6 +883,34 @@ class BoardRoutingTests(unittest.TestCase):
         b.keyboard.release("1")
         self.assertEqual(b.ext_read(0x913A), 0x00)
 
+    def test_field_status_device_answers_boot_sequence(self):
+        """Страница 0x80 отвечает последовательностью 00 -> 55 -> AA.
+
+        Найдено трассировкой загрузки настоящей прошивки (код 0x4CE0/0x51E7/
+        0x51F4): без этой последовательности прошивка уходит в ветку
+        ожидания.  Устройство включается только проводкой RECOVERED_WIRING.
+        """
+        from board.cashboard import RECOVERED_WIRING
+        b = CashRegisterBoard(wiring=RECOVERED_WIRING)
+        first = [b.ext_read(0x8030) for _ in range(3)]
+        second = [b.ext_read(0x8030) for _ in range(3)]
+        self.assertEqual(first, [0x00, 0x55, 0xAA])
+        self.assertEqual(second, [0x00, 0x55, 0xAA],
+                         "последовательность циклическая")
+
+    def test_field_id_pair_answers_boot_check(self):
+        """XDATA 0x933E/0x933F = 55 AA — требование кода 0x07D7."""
+        from board.cashboard import RECOVERED_WIRING
+        b = CashRegisterBoard(wiring=RECOVERED_WIRING)
+        self.assertEqual(b.ext_read(0x933E), 0x55)
+        self.assertEqual(b.ext_read(0x933F), 0xAA)
+
+    def test_default_wiring_has_no_field_devices(self):
+        """По умолчанию «полевые» устройства не включены (demo51 не меняем)."""
+        b = CashRegisterBoard()
+        self.assertNotEqual(b.ext_read(0x933E), 0x55)
+        self.assertNotEqual(b.ext_read(0x933F), 0xAA)
+
     def test_empty_firmware_streams_leave_the_board_quiet(self):
         b = CashRegisterBoard()
         b.serial_read()

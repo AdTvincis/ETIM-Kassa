@@ -1001,5 +1001,74 @@ class TestRealHexRunner(unittest.TestCase):
                 pass
 
 
+class TestRestoredBoot(unittest.TestCase):
+    """Восстановленная загрузка настоящей прошивки (проводка RECOVERED_WIRING).
+
+    Проверяет то, что найдено трассировкой (см. docs/usage.md §4.3 и
+    ``tools/_diag_real_boot.py``): с ППИ вне диапазона самотеста и с
+    «полевыми» устройствами-ответчиками настоящая прошивка проходит свой
+    самотест ОЗУ, доходит до главного цикла и САМА сканирует матрицу
+    клавиатуры, кладя коды в своё кольцо.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from recover.hal import CashRegisterHAL, load_rom
+        cls.load_rom = load_rom
+        cls.CashRegisterHAL = CashRegisterHAL
+        cls.rom = load_rom()
+
+    def setUp(self):
+        from board.cashboard import CashRegisterBoard, RECOVERED_WIRING
+        from recover.realrun import RealRunner
+
+        self.board = CashRegisterBoard(wiring=RECOVERED_WIRING)
+        hal = self.CashRegisterHAL(board=self.board, rom=self.rom, strict=True)
+        self.runner = RealRunner(hal=hal, rom=self.rom)
+        self.cpu = getattr(self.runner, "cpu", None) or getattr(self.runner, "_cpu")
+
+    def _boot_to_gate(self, limit_cycles: int = 12_000_000) -> bool:
+        """Крутит эмуляцию до петли опроса кольца (CPU 0x0AD5..0x0AD8)."""
+        for _ in range(limit_cycles // 20_000):
+            self.runner.advance(20_000)
+            if 0x0AD5 <= self.cpu.pc <= 0x0AD8:
+                return True
+            if self.runner.halted:
+                return False
+        return False
+
+    def test_self_test_passes_and_boot_reaches_main_loop(self):
+        """Самотест ОЗУ пройден, загрузка идёт до главного цикла."""
+        reached = self._boot_to_gate()
+        self.assertFalse(self.runner.halted, self.runner.halt_reason)
+        self.assertTrue(reached, "загрузка не дошла до петли 0x0AD5 (pc=%#x)"
+                        % self.cpu.pc)
+        self.assertNotIn("h0000", self.board.display.text(),
+                         "экрана ошибки самотеста быть не должно")
+        stats = self.runner.stats()
+        self.assertGreater(stats["mux_calls"], 100, "мукс обязан работать")
+
+    def test_firmware_scans_the_matrix_itself(self):
+        """Прошивка сама читает страницу клавиатуры 0x91 (наш ISR-скан)."""
+        self._boot_to_gate()
+        self.assertGreater(self.runner.stats()["keyboard_reads"], 0,
+                           "прошивка должна сама сканировать матрицу 0x91")
+
+    def test_service_key_passes_boot_gate_and_ring_receives_codes(self):
+        """Клавиша «1» (код 0x10) проходит ворота, и коды ложатся в кольцо."""
+        self.assertTrue(self._boot_to_gate())
+        before = self.cpu.ram[0x4F]
+        self.board.keyboard.press("1")
+        self.runner.advance(200_000)
+        self.board.keyboard.release("1")
+        self.runner.advance(300_000)
+        # кольцо XDATA 0x0C80: указатель записи сдвинулся
+        self.assertNotEqual(self.cpu.ram[0x4F], before,
+                            "код клавиши не попал в кольцо прошивки")
+        # «1» проходит стартовые ворота 0x5C6D и прошивка рисует свой вывод
+        self.assertNotEqual(self.board.display.text().strip(), "",
+                            "экран обязан показать вывод прошивки")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
